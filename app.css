@@ -383,3 +383,5 @@ iframe.ar{width:100%;height:calc(100vh - 150px);border:1px solid var(--line);bor
 .fs.dense tr.sec td{font-size:9.5px;padding-bottom:1px}.fs.dense .vbar{height:6px}
 .fs tr.sec td{height:var(--rh,28px)}.fs.dense tr.sec td{height:var(--rh)}
 .fs tr.tot.final td.pos,.fs tr.tot.final td.neg{color:#fff!important}
+.lines col.c-date{width:116px}.lines col.c-doc{width:124px}.lines col.c-lnk{width:74px}
+#lt td{white-space:nowrap}#lt td.memo,#lt td.who{white-space:normal}

@@ -207,6 +207,23 @@ def build_live(cfg, tz):
         if k not in memo_ix:
             lbl = "Bill" if gk[0] == "APJ" else "Invoice"
             memo_ix[k].append((f"{lbl} - {name}: {'; '.join(ms)}".rstrip(": "), gk[5]))
+    # Batch summary entries can also combine several documents from the same vendor/customer, date, account and
+    # location into one GL line (e.g. four bills posted together); index those day totals too.
+    day = defaultdict(lambda: [0.0, [], [], ""])
+    for gk, (tot, ms, name) in grp.items():
+        e = day[gk[:5]]
+        e[0] += tot
+        e[1].extend(m for m in ms if m not in e[1])
+        if gk[5]:
+            e[2].append(gk[5])
+        e[3] = name
+    for dk, (tot, ms, docs, name) in day.items():
+        if len(docs) < 2:
+            continue
+        k = dk + (round(abs(tot), 2),)
+        if k not in memo_ix:
+            lbl = "Bills" if dk[0] == "APJ" else "Invoices"
+            memo_ix[k].append((f"{lbl} - {name}: {'; '.join(ms)}".rstrip(": "), ", ".join(docs)))
     matched = 0
     for r in raw:
         memo, doc = g(r, "description") or "", ""
