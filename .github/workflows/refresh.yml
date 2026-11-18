@@ -1,0 +1,54 @@
+name: Refresh financials dashboard
+
+# Manual refresh: Actions -> Refresh financials dashboard -> Run workflow.
+# It also runs when you upload a new file (e.g. config.enc.json) to the main branch.
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - run: pip install -r requirements.txt
+
+      - name: Build site folder
+        run: |
+          mkdir -p site
+          cp index.html app.js app.css logo.png site/
+
+      - name: Pull from Sage Intacct and encrypt
+        env:
+          SAGE_CLIENT_ID: ${{ secrets.SAGE_CLIENT_ID }}
+          SAGE_CLIENT_SECRET: ${{ secrets.SAGE_CLIENT_SECRET }}
+          SAGE_USERNAME: ${{ secrets.SAGE_USERNAME }}
+          CONFIG_KEY: ${{ secrets.CONFIG_KEY }}
+          DASHBOARD_PASSWORD: ${{ secrets.DASHBOARD_PASSWORD }}
+        run: python fetch_fin.py --out site/data.enc.json
+
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: site
+      - id: deployment
+        uses: actions/deploy-pages@v4
