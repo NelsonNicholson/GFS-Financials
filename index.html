@@ -1,0 +1,61 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex,nofollow">
+<title>GFS Financials</title>
+<link rel="icon" href="logo.png">
+<link rel="stylesheet" href="app.css">
+</head>
+<body>
+<section id="lock">
+  <form class="lockcard" id="lockForm" autocomplete="off">
+    <img src="logo.png" alt="GFS Logistics">
+    <h1>GFS Financials Dashboard</h1>
+    <p>Enter the dashboard passphrase to continue.</p>
+    <input class="field" id="pw" type="password" placeholder="Passphrase" autofocus aria-label="Passphrase">
+    <label class="chk"><input type="checkbox" id="remember"> Remember on this device</label>
+    <button class="btn primary wide" type="submit" id="unlockBtn">Unlock</button>
+    <div class="err" id="err" role="alert"></div>
+  </form>
+</section>
+
+<div id="app" class="hidden">
+  <div class="topbar"><div class="wrap">
+    <div class="brand"><img src="logo.png" alt="GFS Logistics"><div class="t"><h1>Financials</h1><div class="sub" id="subTitle">GFS Logistics</div></div></div>
+    <div class="spacer"></div>
+    <div class="toolbar">
+      <span class="live" id="liveBadge" title=""><i></i><span id="liveText">Live</span></span>
+      <label class="small muted" for="repMonth">Reporting month</label>
+      <select id="repMonth" aria-label="Reporting month"></select>
+      <button class="btn" id="themeBtn" title="Switch light / dark">Theme</button>
+      <button class="btn" id="lockBtn" title="Lock the dashboard">Lock</button>
+    </div>
+  </div></div>
+  <div class="wrap">
+    <nav class="nav" role="tablist" id="nav">
+      <button role="tab" data-view="summary" aria-selected="true">Summary</button>
+      <button role="tab" data-view="pl">P&amp;L</button>
+      <button role="tab" data-view="compare">Month Compare</button>
+      <button role="tab" data-view="sales">Sales by Customer</button>
+      <button role="tab" data-view="move">G3 Move</button>
+      <button role="tab" data-view="ar">AR</button>
+      <button role="tab" data-view="admin" title="Classification &amp; inputs">⚙ Inputs</button>
+    </nav>
+    <div id="banners"></div>
+    <main id="view"></main>
+    <footer id="foot"></footer>
+  </div>
+</div>
+
+<div id="scrim" class="hidden"></div>
+<aside id="drawer" class="hidden" aria-modal="true" role="dialog">
+  <header><div style="flex:1;min-width:0"><div class="small muted" id="dKicker"></div><h3 id="dTitle"></h3></div>
+    <button class="btn" id="dCsv">CSV</button><button class="close" id="dClose" aria-label="Close">×</button></header>
+  <div class="dbody" id="dBody"></div>
+</aside>
+<div class="tip hidden" id="tip"></div>
+<script src="app.js"></script>
+</body>
+</html>
