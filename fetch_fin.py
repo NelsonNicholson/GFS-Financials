@@ -161,15 +161,53 @@ def url_token(u):
 def build_live(cfg, tz):
     s = Sage()
     today = dt.datetime.now(tz).date()
-    fy0 = cfg.get("dataStart", cfg["fyStart"] + "-01")
+    hist0 = cfg.get("historyStart", "2024-01-01")          # earliest month pulled from Sage
+    detail_year = str(today.year)                          # full line detail in the main file; older years load on demand
     S = Strings()
     names = dict(cfg.get("accountNames", {}))
 
-    # --- 1. P&L general ledger lines (accounts 4000 and up)
-    raw = gl_query(s, [{"$between": {"entryDate": [fy0, today.isoformat()]}}, {"$gte": {"glAccount.id": "4000"}}])
+    # --- 1. P&L general ledger lines (accounts 4000 and up), all years since hist0
+    raw = gl_query(s, [{"$between": {"entryDate": [hist0, today.isoformat()]}}, {"$gte": {"glAccount.id": "4000"}}])
+
+    # --- 1b. GL Report memo: lines posted from AP bills / AR invoices carry no line description in the GL
+    #         (only the batch name). Pull the source document lines and rebuild "Bill - Vendor: memo".
+    memo_ix = defaultdict(list)
+    bills = s.query("accounts-payable/bill-line",
+                    ["memo", "glAccount.id", "baseAmount", "bill.billNumber", "bill.postingDate", "bill.vendor.name", "dimensions.location.id"],
+                    [{"$gte": {"bill.postingDate": hist0}}, {"$gte": {"glAccount.id": "2100"}}], required=False) or []
+    for r in bills:
+        k = ("APJ", g(r, "bill.postingDate"), g(r, "glAccount.id"), g(r, "dimensions.location.id") or "", (g(r, "bill.vendor.name") or "").lower(),
+             round(abs(money(g(r, "baseAmount"))), 2))
+        vend = g(r, "bill.vendor.name") or ""
+        memo_ix[k].append((f"Bill - {vend}: {g(r, 'memo') or ''}".rstrip(": "), g(r, "bill.billNumber") or ""))
+    inv = s.query("accounts-receivable/invoice-line",
+                  ["invoice.invoiceDate", "invoice.invoiceNumber", "invoice.customer.id", "invoice.customer.name",
+                   "dimensions.location.id", "glAccount.id", "baseAmount", "memo"],
+                  [{"$gte": {"invoice.invoiceDate": hist0}}, {"$startsWith": {"glAccount.id": "4"}}])
+    for r in inv:
+        cust = g(r, "invoice.customer.name") or ""
+        k = ("ARJ", g(r, "invoice.invoiceDate"), g(r, "glAccount.id"), g(r, "dimensions.location.id") or "", cust.lower(),
+             round(abs(money(g(r, "baseAmount"))), 2))
+        memo_ix[k].append((f"Invoice - {cust}: {g(r, 'memo') or ''}".rstrip(": "), g(r, "invoice.invoiceNumber") or ""))
+    matched = 0
+    for r in raw:
+        memo, doc = g(r, "description") or "", ""
+        j = g(r, "journalEntry.glJournal.id") or ""
+        if not memo and j in ("APJ", "ARJ"):
+            who = (g(r, "dimensions.vendor.name") if j == "APJ" else g(r, "dimensions.customer.name")) or ""
+            k = (j, g(r, "entryDate"), g(r, "glAccount.id"), g(r, "dimensions.location.id") or "", who.lower(), round(abs(r["_amt"]), 2))
+            hit = memo_ix.get(k)
+            if hit:
+                memo, doc = hit.pop(0) if len(hit) > 1 else hit[0]
+                matched += 1
+        r["_memo"], r["_doc"] = memo or (g(r, "journalEntry.description") or ""), doc
+    print(f"[memo] {matched} AP/AR lines given their GL report memo")
+
     excl = cfg.get("excludeLines", [])
     used_excl = [False] * len(excl)
-    gl, excluded = [], []
+    excluded = []
+    agg = defaultdict(float)
+    per_year = defaultdict(list)
     for r in raw:
         a, d, amt = g(r, "glAccount.id"), g(r, "entryDate"), r["_amt"]
         names.setdefault(a, g(r, "glAccount.name") or a)
@@ -179,19 +217,43 @@ def build_live(cfg, tz):
             used_excl[hit] = True
             excluded.append({"d": d, "acct": a, "amt": amt, "why": excl[hit].get("why", "")})
             continue
-        gl.append([d, a, g(r, "dimensions.location.id") or "", amt, S(g(r, "dimensions.employee.id")),
-                   S(g(r, "dimensions.customer.name")), S(g(r, "dimensions.vendor.name")),
-                   S(g(r, "description") or g(r, "journalEntry.description")), S(g(r, "journalEntry.glJournal.id")),
-                   S(url_token(g(r, "journalEntry.webURL"))), S(g(r, "journalEntry.id"))])
-    gl.sort(key=lambda x: (x[0], x[1]))
-    print(f"[gl] {len(gl)} P&L lines from {fy0}; {len(excluded)} excluded by config rule")
+        loc = g(r, "dimensions.location.id") or ""
+        agg[(a, loc, d[:7])] += amt
+        per_year[d[:4]].append(r)
+
+    def lines_for(rows, T):
+        out = [[g(r, "entryDate"), g(r, "glAccount.id"), g(r, "dimensions.location.id") or "", r["_amt"], T(g(r, "dimensions.employee.id")),
+                T(g(r, "dimensions.customer.name")), T(g(r, "dimensions.vendor.name")), T(r["_memo"]), T(g(r, "journalEntry.glJournal.id")),
+                T(url_token(g(r, "journalEntry.webURL"))), T(g(r, "journalEntry.id")), T(r["_doc"])] for r in rows]
+        out.sort(key=lambda x: (x[0], x[1]))
+        return out
+
+    gl = lines_for(per_year.get(detail_year, []), S)
+    hist = {}
+    for y, rows in per_year.items():
+        if y == detail_year:
+            continue
+        T = Strings()
+        hist[y] = {"v": 1, "year": y, "S": None, "gl": lines_for(rows, T)}
+        hist[y]["S"] = T.S
+    aggl = [[a, l, m, round(v, 2)] for (a, l, m), v in sorted(agg.items()) if abs(v) >= 0.005]
+    print(f"[gl] {len(raw)} P&L lines since {hist0}: {len(gl)} in {detail_year} (main file), "
+          f"{', '.join(f'{len(v['gl'])} in {y}' for y, v in sorted(hist.items()))}; {len(excluded)} excluded by config rule")
 
     # --- 2. Fixed-asset additions (move CapEx lives on the balance sheet, 2100 group)
     fa_raw = gl_query(s, [{"$between": {"entryDate": [cfg.get("moveStart", "2026-06") + "-01", today.isoformat()]}},
                           {"$startsWith": {"glAccount.id": "2100"}}])
-    fa = [r for r in fa_raw if r["_amt"] > 0]
     for r in fa_raw:
         names.setdefault(g(r, "glAccount.id"), g(r, "glAccount.name") or g(r, "glAccount.id"))
+        j = g(r, "journalEntry.glJournal.id") or ""
+        memo, doc = g(r, "description") or "", ""
+        if not memo and j == "APJ":
+            hit = memo_ix.get((j, g(r, "entryDate"), g(r, "glAccount.id"), g(r, "dimensions.location.id") or "",
+                               (g(r, "dimensions.vendor.name") or "").lower(), round(abs(r["_amt"]), 2)))
+            if hit:
+                memo, doc = hit[0]
+        r["_memo"], r["_doc"] = memo or (g(r, "journalEntry.description") or ""), doc
+    fa = [r for r in fa_raw if r["_amt"] > 0]
 
     # --- 3. Move classification: 6120 (P&L) + 2100 additions
     mv = classify_move(cfg, [r for r in raw if g(r, "glAccount.id") == "6120-000"] + fa, S)
@@ -202,49 +264,43 @@ def build_live(cfg, tz):
     # --- 4. Budget
     bud_rows = s.query("general-ledger/budget-detail",
                        ["glAccount.id", "dimensions.location.id", "reportingPeriod.startDate", "amount", "budget.id"],
-                       [{"$eq": {"budget.id": cfg.get("budgetId", "GFS Budget")}}, {"$gte": {"reportingPeriod.startDate": fy0}}])
+                       [{"$eq": {"budget.id": cfg.get("budgetId", "GFS Budget")}}, {"$gte": {"reportingPeriod.startDate": hist0}}])
     bud = [[g(r, "glAccount.id"), g(r, "dimensions.location.id") or "", (g(r, "reportingPeriod.startDate") or "")[:7],
             money(g(r, "amount"))] for r in bud_rows if money(g(r, "amount"))]
     print(f"[budget] {len(bud)} budget cells")
 
     # --- 5. Sales by customer (invoice lines on revenue accounts, by invoice date) + credit memos
     sales = []
-    inv = s.query("accounts-receivable/invoice-line",
-                  ["invoice.invoiceDate", "invoice.invoiceNumber", "invoice.customer.id", "invoice.customer.name",
-                   "dimensions.location.id", "glAccount.id", "baseAmount"],
-                  [{"$gte": {"invoice.invoiceDate": fy0}}, {"$startsWith": {"glAccount.id": "4"}}])
-    agg = defaultdict(float)
+    sagg = defaultdict(float)
     for r in inv:
         k = (g(r, "invoice.invoiceDate"), g(r, "invoice.invoiceNumber") or "", g(r, "invoice.customer.name") or g(r, "invoice.customer.id"),
              g(r, "dimensions.location.id") or "", "i")
-        agg[k] += money(g(r, "baseAmount"))
+        sagg[k] += money(g(r, "baseAmount"))
     adj = s.query("accounts-receivable/adjustment-line",
                   ["arAdjustment.createdDate", "arAdjustment.adjustmentNumber", "arAdjustment.customer.name",
                    "dimensions.location.id", "glAccount.id", "baseCurrency.amount"],
-                  [{"$gte": {"arAdjustment.createdDate": fy0}}, {"$startsWith": {"glAccount.id": "4"}}], required=False) or []
+                  [{"$gte": {"arAdjustment.createdDate": hist0}}, {"$startsWith": {"glAccount.id": "4"}}], required=False) or []
     for r in adj:
         k = (g(r, "arAdjustment.createdDate"), g(r, "arAdjustment.adjustmentNumber") or "", g(r, "arAdjustment.customer.name") or "",
              g(r, "dimensions.location.id") or "", "c")
-        agg[k] += money(g(r, "baseCurrency.amount"))
-    for (d, n, c, loc, kind), v in sorted(agg.items()):
+        sagg[k] += money(g(r, "baseCurrency.amount"))
+    for (d, n, c, loc, kind), v in sorted(sagg.items()):
         if abs(v) >= 0.005 and d:
             sales.append([d, S(n), S(c), loc, round(v, 2), kind])
     print(f"[sales] {sum(1 for x in sales if x[5] == 'i')} invoices, {sum(1 for x in sales if x[5] == 'c')} credit memos")
 
-    # --- 6. Tie-out checks (pass/fail only - public log)
+    # --- 6. Checks (pass/fail only - public log)
     checks = {"excludedLines": excluded, "excludeRulesUnused": [x for i, x in enumerate(excl) if not used_excl[i]]}
-    for m, ref in (cfg.get("moveRefByMonth") or {}).items():
-        pass  # reference values are from the package; the browser shows the Sage number
     warn = []
     known = set(cfg.get("knownAccounts", []))
     if known:
-        unk = sorted({x[1] for x in gl} - known)
+        unk = sorted({k[0] for k in agg} - known)
         if unk:
             warn.append(f"{len(unk)} GL account(s) are not in the report structure: " + ", ".join(unk))
             print(f"::warning::{len(unk)} GL account(s) not in the report structure - shown under 'Unmapped' on the dashboard")
 
-    return {"gl": gl, "fa_count": len(fa), "mv": mv, "bud": bud, "sales": sales, "S": S.S, "acctNames": names,
-            "checks": checks, "warnings": warn}
+    return {"gl": gl, "detailYear": detail_year, "agg": aggl, "histYears": sorted(hist), "fa_count": len(fa), "mv": mv, "bud": bud,
+            "sales": sales, "S": S.S, "acctNames": names, "checks": checks, "warnings": warn, "_hist": hist}
 
 
 def classify_move(cfg, rows, S):
@@ -260,7 +316,7 @@ def classify_move(cfg, rows, S):
         a, d, amt = g(r, "glAccount.id"), g(r, "entryDate"), r["_amt"]
         key = f"{g(r, 'id')}"
         vend = g(r, "dimensions.vendor.name") or ""
-        memo = g(r, "description") or g(r, "journalEntry.description") or ""
+        memo = r.get("_memo") or g(r, "description") or g(r, "journalEntry.description") or ""
         rec = [d, a, g(r, "dimensions.location.id") or "", amt, None, "none", S(vend), S(memo),
                S(url_token(g(r, "journalEntry.webURL"))), key, S(g(r, "dimensions.employee.id"))]
         if key in manual:
@@ -314,7 +370,11 @@ def main():
     password = env("DASHBOARD_PASSWORD")
     if len(password) < 12:
         sys.exit("DASHBOARD_PASSWORD must be at least 12 characters.")
-    os.makedirs(os.path.dirname(os.path.abspath(args.out)), exist_ok=True)
+    outdir = os.path.dirname(os.path.abspath(args.out))
+    os.makedirs(outdir, exist_ok=True)
+    for y, h in (snap.pop("_hist", None) or {}).items():   # older years: separate files, loaded only when someone opens them
+        json.dump(encrypt_for_viewers(h, password), open(os.path.join(outdir, f"hist-{y}.enc.json"), "w"))
+        print(f"[history] {y}: encrypted file written")
     json.dump(encrypt_for_viewers(snap, password), open(args.out, "w"))
     print(f"[{snap['mode']}] encrypted data file written ({os.path.getsize(args.out) // 1024} KB)")
 
