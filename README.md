@@ -7,8 +7,9 @@ The monthly GFS financial package as an interactive website, fed by Sage Intacct
 | Section | What it shows |
 |---|---|
 | **Summary** | Headline numbers for the reporting month vs budget, prior month, YTD and prior year; "what moved" notes written from the GL; budget-to-actual bridge; division cards; warehouse labor, overtime, freight markup, customer movers, capacity and AR |
-| **P&L** | Statement of Operations (consolidated) or Standard P&L (Consolidated, G1, G2, CW). Month vs Budget (pick the actual and budget months), Month over Month, YTD vs Budget. Groups expand to accounts; every actual amount opens the journal lines behind it, with a link into Sage |
+| **P&L** | Statement of Operations (consolidated) or Standard P&L (Consolidated, G1, G2, CW). Month vs Budget (pick the actual and budget months), Month over Month, YTD vs Budget. Groups expand to accounts (subtotals below each group; Warehouse Labor split into employee, temp-to-hire and temporary). Every actual amount opens the journal lines behind it. Export to Excel (formulas, outline grouping) or PDF (auditor-style, one portrait page when it fits) |
 | **Month Compare** | Any two months side by side, with plain-English explanations of the biggest changes (customers, vendors, employees behind each line, one-time and new items flagged) |
+| **Warehouse Labor** | Cost by employee and position (from June 2026, when Sage started tagging payroll lines by employee), overtime history heatmap, agency labor by vendor |
 | **Sales by Customer** | Invoiced sales from Sage AR by customer vs the customer budget: month vs budget, month over month with YTD |
 | **G3 Move** | Move spend vs the move budget by category, split between expensed (6120) and capitalized (2100 group) |
 | **AR** | The existing AR Aging Dashboard, embedded unchanged |

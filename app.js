@@ -77,8 +77,10 @@ async function ensureYears(years) {
 }
 
 /* ============================================================ model */
+const CUST_MERGE = [[/^Applied Adhesives\s*\((APPPAY|WARADH)\)\s*$/i, "Applied Adhesives"]];
+const custName = c => { if (!c) return c; const mm = (M && M.cfg && M.cfg.customerMerge) || {}; if (mm[c]) return mm[c]; for (const [re, to] of CUST_MERGE) if (re.test(c)) return to; return c; };
 function mapLine(r, S) { const s = i => (i == null || i < 0) ? "" : (S[i] ?? "");
-  return {d: r[0], m: r[0].slice(0, 7), a: r[1], l: r[2] || "", v: r[3], e: s(r[4]), c: s(r[5]), vn: s(r[6]), memo: s(r[7]), j: s(r[8]), u: s(r[9]), je: s(r[10]), doc: s(r[11])}; }
+  return {d: r[0], m: r[0].slice(0, 7), a: r[1], l: r[2] || "", v: r[3], e: s(r[4]), c: custName(s(r[5])), vn: s(r[6]), memo: s(r[7]), j: s(r[8]), u: s(r[9]), je: s(r[10]), doc: s(r[11])}; }
 function addLines(rows, S) { for (const r of rows || []) M.lines.push(mapLine(r, S)); M.lines.sort((a, b) => a.d < b.d ? -1 : a.d > b.d ? 1 : 0); }
 function buildModel(snap) {
   const S = snap.S || [], cfg = snap.cfg || {};
@@ -97,7 +99,7 @@ function buildModel(snap) {
   M.budYears = new Set(); for (const a in M.B) for (const l in M.B[a]) for (const m in M.B[a][l]) M.budYears.add(m.slice(0, 4));
   const cw = cfg.cwCustomerDivision || {default: "G1", contains: {}};
   const sdiv = (l, c) => { if (l === "G1" || l === "G2") return l; for (const [k, d] of Object.entries(cw.contains || {})) if (c.toUpperCase().includes(k.toUpperCase())) return d; return cw.default || "G1"; };
-  M.sales = (snap.sales || []).map(r => { const c = s(r[2]); return {d: r[0], m: r[0].slice(0, 7), doc: s(r[1]), c, l: r[3], v: r[4], k: r[5], div: sdiv(r[3], c)}; });
+  M.sales = (snap.sales || []).map(r => { const c = custName(s(r[2])); return {d: r[0], m: r[0].slice(0, 7), doc: s(r[1]), c, l: r[3], v: r[4], k: r[5], div: sdiv(r[3], c)}; });
   M.mv = (snap.mv || []).map(r => ({d: r[0], m: r[0].slice(0, 7), a: r[1], l: r[2], v: r[3], cat: r[4], how: r[5], vn: s(r[6]), memo: s(r[7]), u: s(r[8]), key: r[9], e: s(r[10] ?? -1)}));
 }
 const hasBudget = y => M.budYears.has(String(y));
@@ -147,7 +149,7 @@ let layoutCache = {};
 function layoutDef(type, ent) {
   const key = type + ent; if (layoutCache[key]) return layoutCache[key];
   const L = [], used = new Set(), soo = type === "soo";
-  const grp = (id, label, rows, good) => { rows.forEach(r => r.t === "acct" && used.add(r.a)); L.push({k: "grp", id, label, rows, good}); };
+  const grp = (id, label, rows, good, subs) => { rows.forEach(r => r.t === "acct" && used.add(r.a)); L.push({k: "grp", id, label, rows, good, subs}); };
   const sec = label => L.push({k: "sec", label});
   const tot = (id, label, parts, good, cls) => L.push({k: "tot", id, label, parts, good, cls});
   const pct = (label, num, den) => L.push({k: "pct", label, num, den});
@@ -160,7 +162,10 @@ function layoutDef(type, ent) {
   tot("rev", "Total Revenue", [["rv_st", 1], ["rv_fu", 1], ["rv_ha", 1], ["rv_fr", 1], ["rv_ot", 1]], 1, "key");
   sec("Cost of Goods Sold");
   grp("cg_fr", "Freight Expense", rowsOf(accts(pre("5010", "5011", "5012", "5013"))), -1);
-  grp("cg_lb", "Warehouse Labor", rowsOf(accts(pre("5035", "5040", "5045"))), -1);
+  { const LB = [["cg_lb_e", "GFS Employee Labor", "5035"], ["cg_lb_f", "Full-Time Temp-to-Hire Labor", "5040"], ["cg_lb_t", "Temporary Labor", "5045"]];
+    const rows = [], subs = [];
+    for (const [id, label, px] of LB) { const rs = rowsOf(accts(pre(px))); if (!rs.length) continue; rs.forEach(r => r.sg = id); rows.push(...rs); subs.push({id, label}); }
+    grp("cg_lb", "Warehouse Labor", rows, -1, subs); }
   grp("cg_cm", "Commissions Expense", rowsOf(accts(pre("5025"))), -1);
   grp("cg_pm", "Production Materials", rowsOf(accts(pre("5020"))), -1);
   const oc5 = accts(a => a.startsWith("5") && !used.has(a)); if (oc5.length) grp("cg_ot", "Other Cost of Goods Sold", rowsOf(oc5), -1);
@@ -221,7 +226,7 @@ function computeCol(type, ent, ms, f) {
   const key = [type, ent, ms.join(","), f].join("|"); if (colCache.has(key)) return colCache.get(key);
   const V = {};
   for (const it of layoutDef(type, ent)) {
-    if (it.k === "grp") { let t = 0; for (const r of it.rows) { const v = r.t === "acct" ? accVal(r.a, ent, ms, f) : virtVal(r.k, ms, f); V[r.id] = v; t += v; } V[it.id] = t; }
+    if (it.k === "grp") { let t = 0; for (const r of it.rows) { const v = r.t === "acct" ? accVal(r.a, ent, ms, f) : virtVal(r.k, ms, f); V[r.id] = v; t += v; if (r.sg) V[r.sg] = (V[r.sg] || 0) + v; } V[it.id] = t; }
     else if (it.k === "tot") V[it.id] = it.parts.reduce((s, [id, sg]) => s + (V[id] || 0) * sg, 0);
   }
   colCache.set(key, V); return V;
@@ -361,10 +366,10 @@ const isBatch = s => /batch summary entry|^G[12] (bill|check|journal entry|gener
 function linesTable(ls) {
   const rows = ls.map(x => ({...x, nv: natural(x.a, x.v), who: x.c || x.vn || (x.e ? empName(x.e) : "")}));
   drawerRows = rows.map(x => ({Date: x.d, Document: x.doc, Account: x.a, Division: x.l, Name: x.who, Memo: x.memo, Journal: x.j, Amount: r2(x.nv)}));
-  const body = rs => rs.map(x => `<tr><td>${esc(x.d)}</td><td>${esc(x.doc || x.j)}</td><td>${esc(x.who)}</td><td class="memo ${isBatch(x.memo) ? "batch" : ""}">${esc(x.memo)}</td><td>${esc(x.a)}</td><td>${esc(x.l)}</td><td class="num">${f$(x.nv, 2)}</td><td>${x.u ? `<a href="${sageUrl(x.u)}" target="_blank" rel="noopener" title="Open in Sage Intacct">Sage ↗</a>` : ""}</td></tr>`).join("");
+  const body = rs => rs.map(x => `<tr><td>${esc(x.d)}</td><td>${esc(x.doc || x.j)}</td><td class="who">${esc(x.who)}</td><td class="memo ${isBatch(x.memo) ? "batch" : ""}">${esc(x.memo)}</td><td>${esc(x.a)}</td><td>${esc(x.l)}</td><td class="num">${f$(x.nv, 2)}</td><td>${x.u ? `<a href="${sageUrl(x.u)}" target="_blank" rel="noopener" title="Open in Sage Intacct">Sage ↗</a>` : ""}</td></tr>`).join("");
   setTimeout(() => { const t = $("#lt"); if (!t) return; $$("th[data-s]", t).forEach(th => th.addEventListener("click", () => { const k = th.dataset.s, dir = th.dataset.dir = th.dataset.dir === "asc" ? "desc" : "asc";
     rows.sort((a, b) => (a[k] > b[k] ? 1 : a[k] < b[k] ? -1 : 0) * (dir === "asc" ? 1 : -1)); $("tbody", t).innerHTML = body(rows); })); });
-  return `<div class="tscroll" style="max-height:none;box-shadow:none"><table class="lines" id="lt"><thead><tr><th data-s="d">Date</th><th data-s="doc">Doc</th><th data-s="who">Customer / vendor / employee</th><th data-s="memo">Memo / description</th><th data-s="a">Account</th><th data-s="l">Div</th><th class="num" data-s="nv">Amount</th><th></th></tr></thead><tbody>${body(rows)}</tbody></table></div>`;
+  return `<div class="tscroll" style="max-height:none;box-shadow:none"><table class="lines" id="lt"><colgroup><col class="c-date"><col class="c-doc"><col class="c-who"><col><col class="c-acct"><col class="c-div"><col class="c-amt"><col class="c-lnk"></colgroup><thead><tr><th data-s="d">Date</th><th data-s="doc">Doc</th><th data-s="who">Customer / vendor / employee</th><th data-s="memo">Memo / description</th><th data-s="a">Account</th><th data-s="l">Div</th><th class="num" data-s="nv">Amount</th><th></th></tr></thead><tbody>${body(rows)}</tbody></table></div>`;
 }
 const perLabel = ms => ms.length === 1 ? ymLabel(ms[0], true) : `${ymLabel(ms[0], true)} – ${ymLabel(ms.at(-1), true)}`;
 async function drill(spec, ent, ms, label) {
@@ -401,7 +406,9 @@ function groupVariances(type, ent, ms, basis) {
 
 /* ============================================================ views */
 const views = {};
-const setTitle = (eyebrow, title) => { $("#pgEyebrow").textContent = eyebrow; $("#pgTitle").textContent = title; document.title = `${title} · GFS Financials`; };
+const setTitle = (eyebrow, title) => { $("#pgEyebrow").textContent = eyebrow; $("#pgTitle").textContent = title; document.title = `${title} · GFS Financials`;
+  const open = st.rep >= M.asOf.slice(0, 7);
+  $("#pgTitle").insertAdjacentHTML("beforeend", open ? ` <span class="openpill" title="Month not closed: invoicing, accruals and allocations are incomplete, so ratios and variances are not meaningful yet">Open month · through ${new Date(M.asOf + "T12:00:00").toLocaleDateString("en-US", {month: "short", day: "numeric"})}</span>` : ""); };
 async function render() {
   const y = st.rep.slice(0, 4), need = [y, String(+y - 1)];
   if (st.view === "compare" && st.cmp.a) need.push(st.cmp.a.slice(0, 4), st.cmp.b.slice(0, 4));
@@ -429,7 +436,9 @@ views.summary = el => {
   const mg = (id, V) => V.rev ? V[id] / V.rev : null;
 
   const gv = groupVariances(T, "ALL", [m], basis);
-  const neg = gv.filter(x => x.imp < -500).sort((a, b) => a.imp - b.imp).slice(0, 2), posv = gv.filter(x => x.imp > 500).sort((a, b) => b.imp - a.imp).slice(0, 2);
+  const revG = gv.filter(x => x.g.good === 1 && x.g.id.startsWith("rv_")), revImp = revG.reduce((s, x) => s + x.imp, 0);
+  const gvC = [{g: {label: "Revenue", id: "rev"}, imp: revImp}, ...gv.filter(x => !revG.includes(x))];
+  const neg = gvC.filter(x => x.imp < -500).sort((a, b) => a.imp - b.imp).slice(0, 2), posv = gvC.filter(x => x.imp > 500).sort((a, b) => b.imp - a.imp).slice(0, 2);
   const dRev = A.rev - B.rev, dUni = A.uni - B.uni, up = d => d >= 0 ? "up" : "dn";
   const head = `${mName(m)} revenue of ${fK(A.rev)} came in <span class="${up(dRev)}">${fP(Math.abs(pctOf(A.rev, B.rev) || 0))} ${vsWord(dRev, basis)}</span>; unadjusted net income of ${fK(A.uni)} was <span class="${up(dUni)}">${fK(Math.abs(dUni))} ${vsWord(dUni, basis)}</span>.`;
   const p1 = `Warehouse operating income was <b>${fK(A.woi)}</b>, a <b>${fP(mg("woi", A))}</b> margin (${fPts((mg("woi", A) || 0) - (mg("woi", B) || 0))} vs ${bName}). ` +
@@ -447,25 +456,25 @@ views.summary = el => {
       <div class="chipbox"><div class="cl">${l2}</div><div class="cv ${cls(tone(d2, good))}">${fK(d2, true)}</div></div></div>
       <div class="k-spark">${sparkBars(sv, sb, 11)}</div></div>`; };
   el.innerHTML = `
-    <div class="row"><div class="card brief"><div class="eyebrow">Board briefing · ${esc(ymLabel(m, true))}</div><h2>${head}</h2><p>${p1}</p><p>${p2}</p></div></div>
+    <div class="row"><div class="card brief"><h2>${head}</h2><p>${p1}</p><p>${p2}</p></div></div>
     <div class="row g4">
       ${tile("rev", "Revenue", 1, `YTD ${fK(YA.rev)} · ${fP(pctOf(YA.rev, YB.rev), 1, true)} vs ${bShort}`)}
       ${tile("woi", "Warehouse Operating Income", 1, `${fP(mg("woi", A))} margin · ${fPts((mg("woi", A) || 0) - (mg("woi", B) || 0))} vs ${bShort}`)}
       ${tile("uni", "Unadjusted Net Income", 1, `${fP(mg("uni", A))} margin · YTD ${fK(YA.uni)}`)}
       ${tile("ani", "Adjusted Net Income", 1, `${fP(mg("ani", A))} margin · adjustments ${fK(A.adj, true)}`)}
     </div>
-    <div class="sec"><div><div class="eyebrow">01 · Performance</div><h2>Revenue and profitability</h2></div></div>
+    <div class="sec sh"><h2>Revenue and profitability</h2></div>
     <div class="row g2">
       ${card(`Revenue ${hasBudget(y) ? "vs budget" : "by month"} · ${y}`, `<span id="revLede"></span>`, `<div id="chRev"></div>`)}
-      ${card(`What moved net income vs ${bName}`, `${ymLabel(m, true)} · each bar is a category's impact on unadjusted net income. Click a bar for the detail.`, `<div id="wf"></div>`)}
+      ${card(`What moved net income vs ${bName}`, `<span id="wfLede"></span>`, `<div id="wf"></div>`)}
     </div>
     <div class="row g21">
       ${card("Margins month by month", `Warehouse operating margin and unadjusted net margin${hasBudget(y) ? ", with the budgeted net margin for reference" : ""}`, `<div id="chMg"></div>`)}
       ${card("Highlights & watch list", `Largest category variances vs ${bName}, explained from the GL`, `<ul class="ilist" id="ins"></ul>`)}
     </div>
-    <div class="sec"><div><div class="eyebrow">02 · Divisions</div><h2>Division scorecards</h2><div class="lede">Standard P&L by division · G3 move costs are reported at the consolidated level only · click a card for its income statement</div></div></div>
+    <div class="sec sh"><h2>Division scorecards</h2><div class="lede">Standard P&L by division · G3 move costs are reported at the consolidated level only · click a card for its income statement</div></div>
     <div class="row" id="divs"></div>
-    <div class="sec"><div><div class="eyebrow">03 · Operations</div><h2>Labor, freight and customers</h2></div></div>
+    <div class="sec sh"><h2>Labor, freight and customers</h2></div>
     <div class="row g2">
       ${card("Warehouse labor efficiency", "Warehouse labor cost as a share of revenue · lower is better", `<div id="lab"></div>`)}
       ${card("Overtime control", "Overtime as a share of regular warehouse wages · 8% is a normal month", `<div id="ot"></div>`)}
@@ -488,10 +497,14 @@ views.summary = el => {
   barTarget($("#chRev", el), {labels: MN, actual: ra, target: rb, sel: +m.slice(5) - 1, height: 270,
     onClick: i => { if (ra[i] != null) go("pl", () => Object.assign(st.pl, {mode: "month", actM: ym[i], layout: "soo", ent: "ALL"})); }});
 
-  const imp = gv.filter(x => Math.abs(x.imp) >= 1).sort((a, b) => Math.abs(b.imp) - Math.abs(a.imp)), topI = imp.slice(0, 6), rest = imp.slice(6).reduce((s, x) => s + x.imp, 0);
-  const short = l => l.replace(" Expense", "").replace("Customer Care & Warehouse Manager", "Care & WH Mgr").replace("Occupancy & Utilities", "Occupancy").replace(" Revenue", " rev.");
-  waterfall($("#wf", el), [{label: BASIS[basis], v: B.uni, type: "start"}, ...topI.map(x => ({label: short(x.g.label), v: x.imp, type: "delta", note: `${x.g.label}: ${f$(x.a)} actual vs ${f$(x.b)} ${bName}`, onClick: () => drill(grpSpec(x.g), "ALL", [m], x.g.label)})),
-    ...(Math.abs(rest) >= 1 ? [{label: "All other", v: rest, type: "delta"}] : []), {label: "Actual", v: A.uni, type: "end"}], {height: 296});
+  const imp = gv.filter(x => !revG.includes(x) && Math.abs(x.imp) >= 1).sort((a, b) => Math.abs(b.imp) - Math.abs(a.imp)), topI = imp.slice(0, 4), rest = imp.slice(4).reduce((s, x) => s + x.imp, 0);
+  const short = l => ({"Warehouse Operating Expense": "WH opex", "Customer Care & Warehouse Manager": "Care & WH Mgr", "Occupancy & Utilities": "Occupancy", "Office Compensation": "Office comp", "Administrative Expenses": "Admin", "Professional Fees": "Prof. fees", "Warehouse Labor": "WH labor", "Freight Expense": "Freight", "Production Materials": "Materials", "Computer Equipment & IT": "IT", "Business Development": "Bus. dev.", "Commissions Expense": "Commissions", "Adjustments to Net Income": "Adjustments"})[l] || l.replace(" Expense", "");
+  const costImp = imp.reduce((s, x) => s + x.imp, 0), worst = imp.filter(x => x.imp < 0).sort((a, b) => a.imp - b.imp)[0];
+  $("#wfLede", el).innerHTML = `${ymLabel(m, true)} · revenue ${revImp >= 0 ? "beat" : "missed"} ${bName} by <b>${fK(Math.abs(revImp))}</b>; costs ${costImp >= 0 ? "came in under" : "ran over"} by <b>${fK(Math.abs(costImp))}</b>${worst ? `, led by ${esc(worst.g.label.toLowerCase())} (${fK(worst.imp, true)})` : ""}. Click a bar for the detail.`;
+  waterfall($("#wf", el), [{label: BASIS[basis], v: B.uni, type: "start"},
+    {label: "Revenue", v: revImp, type: "delta", note: `Total revenue: ${f$(A.rev)} actual vs ${f$(B.rev)} ${bName}. ${revG.filter(x => Math.abs(x.imp) >= 500).sort((a, b) => Math.abs(b.imp) - Math.abs(a.imp)).map(x => `${x.g.label} ${fK(x.imp, true)}`).join(" · ")}`, onClick: () => go("pl", () => Object.assign(st.pl, {layout: "soo", ent: "ALL", mode: "month", actM: m, basis}))},
+    ...topI.map(x => ({label: short(x.g.label), v: x.imp, type: "delta", note: `${x.g.label}: ${f$(x.a)} actual vs ${f$(x.b)} ${bName}`, onClick: () => drill(grpSpec(x.g), "ALL", [m], x.g.label)})),
+    ...(Math.abs(rest) >= 1 ? [{label: "Other", v: rest, type: "delta"}] : []), {label: "Actual", v: A.uni, type: "end"}], {height: 296});
 
   const ms = ytd.filter(x => M.months.includes(x));
   const mgS = (id, f) => ms.map(x => { const V = computeCol(T, "ALL", [x], f); return V.rev ? V[id] / V.rev : null; });
@@ -501,8 +514,9 @@ views.summary = el => {
     ...(hasBudget(y) ? [{name: "Budgeted net margin", short: "Net budget", color: "var(--bud)", dash: true, values: mgS("uni", "b")}] : [])],
     onClick: i => go("pl", () => Object.assign(st.pl, {mode: "month", actM: ms[i], layout: "soo", ent: "ALL"}))});
 
-  const others = gv.filter(x => Math.abs(x.imp) > 500 && !posv.includes(x) && !neg.includes(x)).sort((a, b) => Math.abs(b.imp) - Math.abs(a.imp));
-  const ilist = [...posv, ...neg, ...others].slice(0, 6).map(x => ({...x, good: x.imp > 0}));
+  const posH = gv.filter(x => x.imp > 500).sort((a, b) => b.imp - a.imp).slice(0, 2), negH = gv.filter(x => x.imp < -500).sort((a, b) => a.imp - b.imp).slice(0, 2);
+  const others = gv.filter(x => Math.abs(x.imp) > 500 && !posH.includes(x) && !negH.includes(x)).sort((a, b) => Math.abs(b.imp) - Math.abs(a.imp));
+  const ilist = [...posH, ...negH, ...others].slice(0, 6).map(x => ({...x, good: x.imp > 0}));
   const why = x => { const spec = grpSpec(x.g), dv = spec.t === "accts" ? drivers(spec, "ALL", [pm], [m]).filter(d => !/package/i.test(d.k)).sort((p, q) => Math.abs(q.d) - Math.abs(p.d)).slice(0, 2).filter(d => Math.abs(d.d) >= 300) : [];
     const acc = x.g.rows.map(r => ({r, v: r.t === "acct" ? accVal(r.a, "ALL", [m], "a") : virtVal(r.k, [m], "a"), p: r.t === "acct" ? accVal(r.a, "ALL", [pm], "a") : virtVal(r.k, [pm], "a")})).sort((p, q) => Math.abs(q.v - q.p) - Math.abs(p.v - p.p))[0];
     const a1 = acc && Math.abs(acc.v - acc.p) > 300 ? `${acc.r.label.replace(/^\d{4}(-\d{3})? · /, "")} ${fK(acc.v - acc.p, true)} vs ${ymLabel(pm)}` : "";
@@ -516,7 +530,7 @@ views.summary = el => {
     const last = Array.from({length: 12}, (_, i) => addM(m, i - 11)), sv = last.map(x => M.months.includes(x) ? val("rev", "std", e, [x], "a") : null), sb = basis === "bud" ? last.map(x => val("rev", "std", e, [x], "b")) : null;
     return `<div class="card kpi" data-e="${e}"><div class="k-label"><span>${esc(ENTS[e])}</span><span class="tag ${tone(V.uni - VB.uni, 1)}" title="net income vs ${bName}">${fK(V.uni - VB.uni, true)} net</span></div>
       <div class="k-val">${fK(V.rev)}</div><div class="k-sub">revenue · ${fP(pctOf(V.rev, VB.rev), 1, true)} vs ${bShort}</div>
-      <div class="stats" style="--n:3;margin-top:14px"><div class="stat"><div class="sl">Margin</div><div class="sv" style="font-size:17px">${fP(V.rev ? V.gp / V.rev : null)}</div></div><div class="stat"><div class="sl">Net</div><div class="sv" style="font-size:17px">${fK(V.uni)}</div></div><div class="stat"><div class="sl">YTD net</div><div class="sv" style="font-size:17px">${fK(Y.uni)}</div></div></div>
+      <div class="stats s4" style="--n:4;margin-top:14px"><div class="stat"><div class="sl">Gross margin</div><div class="sv">${fP(V.rev ? V.gp / V.rev : null)}</div></div><div class="stat"><div class="sl">Net margin</div><div class="sv ${V.uni < 0 ? "neg" : ""}">${fP(V.rev ? V.uni / V.rev : null)}</div></div><div class="stat"><div class="sl">Net income</div><div class="sv ${V.uni < 0 ? "neg" : ""}">${fK(V.uni)}</div></div><div class="stat"><div class="sl">YTD net</div><div class="sv">${fK(Y.uni)}</div></div></div>
       <div class="k-spark">${sparkBars(sv, sb, 11)}</div></div>`; }).join("");
   $$("#divs .kpi", el).forEach(c => c.addEventListener("click", () => go("pl", () => Object.assign(st.pl, {layout: "std", ent: c.dataset.e, mode: "month", actM: m}))));
 
@@ -568,23 +582,23 @@ views.pl = el => {
   if (!p.basis || !okB(p.basis)) p.basis = ["bud", "py", "pm"].find(okB) || "bud";
   const bc = basisCols(p.basis, ms), bLabel = p.mode === "month" ? (p.basis === "bud" ? `${ymLabel(p.actM)} Budget` : `${ymLabel(bc.ms[0])} Actual`) : (p.basis === "bud" ? "YTD Budget" : `YTD ${bc.ms[0].slice(0, 4)}`);
   const stmt = T === "soo" ? "Statement of Operations" : "Income Statement";
-  const sub = p.mode === "month" ? `${ymLabel(p.actM, true)} actual vs ${p.basis === "bud" ? "budget" : p.basis === "py" ? ymLabel(bc.ms[0], true) : ymLabel(bc.ms[0], true)}` : p.mode === "ytd" ? `Year to date through ${ymLabel(p.actM, true)} vs ${BASIS[p.basis].toLowerCase()}` : p.mode === "trend" ? `Month by month, ${ymLabel(ms[0], true)} – ${ymLabel(p.actM, true)}` : `Variance to budget by month, ${yy}`;
+  const sub = p.mode === "month" ? `${ymLabel(p.actM, true)} · actual vs ${p.basis === "bud" ? "budget" : ymLabel(bc.ms[0], true)}` : p.mode === "ytd" ? `Year to date through ${ymLabel(p.actM, true)} · vs ${BASIS[p.basis].toLowerCase()}` : p.mode === "trend" ? `Month by month · ${ymLabel(ms[0], true)} – ${ymLabel(p.actM, true)}` : `Variance to budget by month · ${yy}`;
   setTitle(`Income statement · ${ENTS_S[ent]}`, stmt);
   const mOpts = [...M.months].reverse().map(x => `<option value="${x}" ${x === p.actM ? "selected" : ""}>${ymLabel(x, true)}</option>`).join("");
-  el.innerHTML = `<div class="toolbar">
-      <label class="ctl"><span>Statement</span><div class="seg" id="lay"><button data-v="soo" aria-pressed="${T === "soo"}">Statement of Operations</button><button data-v="std" aria-pressed="${T === "std"}">Standard P&L</button></div></label>
-      ${T === "std" ? `<label class="ctl"><span>Entity</span><div class="seg" id="ent">${ents.map(e => `<button data-v="${e}" aria-pressed="${e === ent}">${ENTS_S[e]}</button>`).join("")}</div></label>` : ""}
-      <label class="ctl"><span>View</span><div class="seg" id="mode"><button data-v="month" aria-pressed="${p.mode === "month"}">Month</button><button data-v="ytd" aria-pressed="${p.mode === "ytd"}">Year to date</button><button data-v="trend" aria-pressed="${p.mode === "trend"}">Monthly trend</button>${hasBudget(yy) ? `<button data-v="heat" aria-pressed="${p.mode === "heat"}">Variance map</button>` : ""}</div></label>
-      <label class="ctl"><span>${p.mode === "month" ? "Month" : "Through"}</span><select id="am">${mOpts}</select></label>
-      ${p.mode === "month" || p.mode === "ytd" ? `<label class="ctl"><span>Compare to</span><select id="bs">${["bud", "py", "pm"].filter(b => p.mode === "month" || b !== "pm").map(b => `<option value="${b}" ${b === p.basis ? "selected" : ""} ${okB(b) ? "" : "disabled"}>${BASIS[b]}${okB(b) ? "" : " · no data"}</option>`).join("")}</select></label>` : ""}
+  const heat = p.mode === "heat";
+  el.innerHTML = `<div class="toolbar tight inl">
+      <div class="seg" id="lay"><button data-v="soo" aria-pressed="${T === "soo"}">Statement of Operations</button><button data-v="std" aria-pressed="${T === "std"}">Standard P&L</button></div>
+      ${T === "std" ? `<div class="seg" id="ent">${ents.map(e => `<button data-v="${e}" aria-pressed="${e === ent}">${ENTS_S[e]}</button>`).join("")}</div>` : ""}
+      <div class="seg" id="mode"><button data-v="month" aria-pressed="${p.mode === "month"}">Month</button><button data-v="ytd" aria-pressed="${p.mode === "ytd"}" title="Year to date">YTD</button><button data-v="trend" aria-pressed="${p.mode === "trend"}" title="Month-by-month trend">Trend</button>${hasBudget(yy) ? `<button data-v="heat" aria-pressed="${heat}" title="Variance to budget by month">Heatmap</button>` : ""}</div>
+      <label class="ctl"><span>${p.mode === "month" ? "" : "Through"}</span><select id="am" aria-label="Month">${mOpts}</select></label>
+      ${p.mode === "month" || p.mode === "ytd" ? `<label class="ctl"><span>vs</span><select id="bs" aria-label="Compare to">${["bud", "py", "pm"].filter(b => p.mode === "month" || b !== "pm").map(b => `<option value="${b}" ${b === p.basis ? "selected" : ""} ${okB(b) ? "" : "disabled"}>${BASIS[b]}${okB(b) ? "" : " · no data"}</option>`).join("")}</select></label>` : ""}
       <span class="sp"></span>
-      ${p.mode !== "heat" ? `<button class="btn" id="exp">Expand all</button><button class="btn" id="col">Collapse all</button>` : ""}
-      <button class="btn" id="csv">Export</button>
+      <div class="acts">${heat ? "" : `<button class="btn sm" id="xlsx" title="Excel workbook with formulas">⤓ Excel</button><button class="btn sm" id="pdf" title="Formatted statement">⤓ PDF</button>`}</div>
     </div>
-    <div class="sec" style="margin-top:0"><div><div class="eyebrow">${esc(ENTS[ent])}</div><h2>${esc(sub)}</h2><div class="lede">${T === "soo" ? "Customer Care and Warehouse Manager pay is a direct operating cost; the rest of office pay is allocated overhead. " : ""}${p.basis === "bud" && p.mode !== "trend" ? "Budgets are compared at the category level, as in the monthly package." : ""}</div></div>
-      ${p.mode !== "heat" ? `<label class="chkl"><input type="checkbox" id="zeros" ${p.zeros ? "checked" : ""}> Show zero lines</label>` : ""}</div>
-    <div class="fs-wrap" id="fsw"></div>
-    <p class="note" id="fsnote">Click a category to expand it. Click any actual amount to see the journal lines behind it.</p>`;
+    <div class="stmt">${heat ? `<div class="stmt-h"><div class="stmt-t"><h2>${esc(ENTS[ent])}</h2><div class="lede">${esc(sub)}</div></div></div>` : ""}
+      <div class="fs-wrap" id="fsw"></div>
+    </div>
+    <p class="note" id="fsnote">${heat ? "" : `Click a category to expand it. Click any actual amount for the journal lines behind it. ${T === "soo" ? "Customer Care and Warehouse Manager pay is a direct operating cost; the rest of office pay is allocated overhead. " : ""}${p.basis === "bud" && p.mode !== "trend" ? "Budgets are compared at the category level, as in the monthly package." : ""}`}</p>`;
   const L = layoutDef(T, ent);
   const wire = () => {
     $$("#lay button", el).forEach(b => b.addEventListener("click", () => { p.layout = b.dataset.v; views.pl(el); }));
@@ -594,53 +608,258 @@ views.pl = el => {
     const bs = $("#bs", el); if (bs) bs.addEventListener("change", e => { p.basis = e.target.value; views.pl(el); });
     const z = $("#zeros", el); if (z) z.addEventListener("change", e => { p.zeros = e.target.checked; views.pl(el); });
   };
-  if (p.mode === "heat") { wire(); heatmap($("#fsw", el), T, ent, monthsThrough(p.actM), el); $("#csv", el).addEventListener("click", () => {}); return; }
+  if (heat) { wire(); heatmap($("#fsw", el), T, ent, monthsThrough(p.actM), el); return; }
+
   let cols;
-  if (p.mode === "month" || p.mode === "ytd") cols = [{h: p.mode === "month" ? `${ymLabel(p.actM)} Actual` : "YTD Actual", ms, f: "a", click: true}, {h: bLabel, ms: bc.ms, f: bc.f, cmp: true}, {h: "Variance", v: [0, 1], bar: true, cls: "sep"}, {h: "Var %", vp: [0, 1]}, {h: "% of revenue", pr: 0, cls: "sep"}]
+  if (p.mode === "month" || p.mode === "ytd") cols = [{h: p.mode === "month" ? `${ymLabel(p.actM)} Actual` : "YTD Actual", ms, f: "a", click: true, act: true}, {h: bLabel, ms: bc.ms, f: bc.f, cmp: true}, {h: "Variance", v: [0, 1], bar: true, cls: "sep"}, {h: "Var %", vp: [0, 1]}, {h: "% of Rev", pr: 0, cls: "sep"}]
     .concat(p.mode === "ytd" && hasBudget(yy) ? [{h: `FY ${yy} Budget`, ms: yearMonths(yy), f: "b", cls: "sep", fy: true}] : []);
-  else { const yt = monthsThrough(p.actM); cols = yt.map(x => ({h: MN[+x.slice(5) - 1], ms: [x], f: "a", click: true})).concat([{h: "YTD Actual", ms: yt, f: "a", click: true, cls: "sep"}, ...(hasBudget(yy) ? [{h: "YTD Budget", ms: yt, f: "b"}, {h: "Variance", v: [yt.length, yt.length + 1]}] : [])]); }
+  else { const yt = monthsThrough(p.actM); cols = yt.map(x => ({h: MN[+x.slice(5) - 1], ms: [x], f: "a", click: true, mon: true})).concat([{h: "YTD Actual", hs: "YTD", ms: yt, f: "a", click: true, cls: "sep", ytd: true}, ...(hasBudget(yy) ? [{h: "YTD Budget", hs: "Budget", ms: yt, f: "b"}, {h: "Variance", hs: "Var.", v: [yt.length, yt.length + 1]}] : [])]); }
   const data = cols.map(c => c.ms ? computeCol(T, ent, c.ms, c.f) : null);
-  const budCol = c => c.f === "b" || (c.cmp && p.basis === "bud");
-  const vb = c => (c.v || c.vp) && budCol(cols[(c.v || c.vp)[1]]);
-  const vIdx = cols.findIndex(c => c.bar), maxVar = vIdx < 0 ? 1 : Math.max(1, ...L.filter(i => i.k === "grp").map(i => Math.abs((data[0][i.id] || 0) - (data[1][i.id] || 0))));
-  const cell = (c, i, id, good, r) => {
-    const acctRow = r && (r.nb || r.t === "acct");
-    if (acctRow && (budCol(c) && c.ms)) return `<td class="dim ${c.cls || ""}">–</td>`;
-    if (acctRow && vb(c)) return `<td class="${c.cls || ""}"></td>`;
-    if (c.v) { const d = (data[c.v[0]][id] || 0) - (data[c.v[1]][id] || 0), t = tone(d, good), w = Math.min(50, Math.abs(d) / maxVar * 50);
-      const bar = c.bar ? `<span class="vbar"><span style="${d * good >= 0 ? `left:50%;width:${w}%` : `right:50%;width:${w}%`};background:var(--${t === "bad" ? "bad" : t === "good" ? "good" : "faint"})"></span></span>` : "";
-      return `<td class="${c.cls || ""}"><div class="vb"><span class="${cls(t)}">${Math.abs(d) < .5 ? "–" : fN(d)}</span>${bar}</div></td>`; }
-    if (c.vp) { const a = data[c.vp[0]][id] || 0, b = data[c.vp[1]][id] || 0, t = tone(a - b, good); return `<td class="${cls(t)} ${c.cls || ""}">${Math.abs(b) > .5 ? fP(pctOf(a, b), 1, true) : "–"}</td>`; }
-    if (c.pr != null) { const rv = data[c.pr].rev || 0; return `<td class="muted ${c.cls || ""}">${rv && Math.abs(data[c.pr][id] || 0) > .5 ? fP((data[c.pr][id] || 0) / rv) : "–"}</td>`; }
-    return `<td class="${c.cls || ""} ${c.click && r !== false ? "c" : ""}" data-col="${i}" data-id="${id}">${fN(data[i][id])}</td>`;
-  };
   const isZero = id => data.every(d => !d || Math.abs(d[id] || 0) < .5);
-  let h = `<colgroup><col class="lbl">${cols.map(() => `<col>`).join("")}</colgroup><thead><tr><th>${esc(ENTS_S[ent])}</th>${cols.map(c => `<th class="${c.cls || ""}">${esc(c.h)}</th>`).join("")}</tr></thead><tbody>`;
-  const csv = [["Line", ...cols.map(c => c.h)]];
-  const csvRow = (label, id) => csv.push([label, ...cols.map((c, i) => c.ms ? r2(data[i][id] || 0) : c.v ? r2((data[c.v[0]][id] || 0) - (data[c.v[1]][id] || 0)) : "")]);
-  for (const it of L) {
-    if (it.k === "sec") h += `<tr class="sec"><td colspan="${cols.length + 1}">${esc(it.label)}</td></tr>`;
-    else if (it.k === "grp") {
-      if (!p.zeros && isZero(it.id) && it.rows.every(r => isZero(r.id))) continue;
-      const open = p.open.has(it.id);
-      h += `<tr class="grp ${open ? "open" : ""}" data-g="${it.id}"><td><span class="tw">▶</span>${esc(it.label)}</td>${cols.map((c, i) => cell(c, i, it.id, it.good)).join("")}</tr>`; csvRow(it.label, it.id);
-      for (const r of it.rows) { if (!p.zeros && isZero(r.id)) continue; csvRow("   " + r.label, r.id);
-        h += `<tr class="acct ${open ? "" : "hide"}" data-p="${it.id}"><td title="${esc(r.label)}">${esc(r.label)}</td>${cols.map((c, i) => cell(c, i, r.id, it.good, r)).join("")}</tr>`; }
-    } else if (it.k === "tot") { h += `<tr class="tot ${it.cls || ""}"><td>${esc(it.label)}</td>${cols.map((c, i) => cell(c, i, it.id, it.good, false)).join("")}</tr>`; csvRow(it.label, it.id); }
-    else if (it.k === "pct") h += `<tr class="pct"><td>${esc(it.label)}</td>${cols.map((c, i) => c.ms ? `<td class="${c.cls || ""}">${fP(data[i][it.den] ? data[i][it.num] / data[i][it.den] : null)}</td>` : c.v ? `<td class="${c.cls || ""}">${(() => { const a = data[c.v[0]], b = data[c.v[1]]; const d = (a[it.den] ? a[it.num] / a[it.den] : 0) - (b[it.den] ? b[it.num] / b[it.den] : 0); return `<span class="${d >= 0 ? "pos" : "neg"}">${fPts(d)}</span>`; })()}</td>` : `<td class="${c.cls || ""}"></td>`).join("")}</tr>`;
-  }
-  $("#fsw", el).innerHTML = `<table class="fs" style="min-width:${360 + cols.length * 118}px">${h}</tbody></table>`;
-  const fs = $("#fsw table", el);
+  const budC = c => c.f === "b" || (c.cmp && p.basis === "bud"), isZeroD = id => data.every((d, i) => !d || budC(cols[i]) || Math.abs(d[id] || 0) < .5);
+  const rows = stmtRows(L, isZero, p.zeros, p.mode === "trend", isZeroD);
+  const ctx = {T, ent, stmt, sub, cols, data, rows, mode: p.mode, actM: p.actM, basis: p.basis, open: p.open};
+  const box = $("#fsw", el);
+  const lblW = p.mode === "trend" ? 230 : 0, wt = c => c.mon || p.mode !== "trend" ? 1 : 1.45, unitW = (box.clientWidth - (lblW || box.clientWidth * .34)) / cols.reduce((s, c) => s + wt(c), 0);
+  const kMode = p.mode === "trend" && unitW < 66;
+  const num = v => kMode ? fNk(v) : fN(v);
+  const vIdx = cols.findIndex(c => c.bar), maxVar = vIdx < 0 ? 1 : Math.max(1, ...rows.filter(r => r.kind === "grp").map(r => Math.abs((data[0][r.id] || 0) - (data[1][r.id] || 0))));
+  const cellH = (c, i, row) => {
+    const cv = stmtCell(ctx, c, i, row), cl = c.cls || "";
+    if (cv.blank) return `<td class="${cl}"></td>`;
+    if (cv.dash) return `<td class="dim ${cl}">–</td>`;
+    if (cv.k === "var") { const t = tone(cv.v, row.good ?? 1), w = Math.min(50, Math.abs(cv.v) / maxVar * 50);
+      const bar = c.bar ? `<span class="vbar"><span style="${cv.v * (row.good ?? 1) >= 0 ? `left:50%;width:${w}%` : `right:50%;width:${w}%`};background:var(--${t === "bad" ? "bad" : t === "good" ? "good" : "faint"})"></span></span>` : "";
+      return `<td class="${cl}"><div class="vb"><span class="${cls(t)}">${Math.abs(cv.v) < .5 ? "–" : num(cv.v)}</span>${bar}</div></td>`; }
+    if (cv.k === "vp") return `<td class="${cls(tone(cv.d, row.good ?? 1))} ${cl}">${cv.v == null ? "–" : fP(cv.v, 1, true)}</td>`;
+    if (cv.k === "pr") return `<td class="muted ${cl}">${cv.v == null ? "–" : fP(cv.v)}</td>`;
+    if (cv.k === "pct") return `<td class="${cl}">${fP(cv.v)}</td>`;
+    if (cv.k === "pts") return `<td class="${cl}"><span class="${cv.v >= 0 ? "pos" : "neg"}">${fPts(cv.v)}</span></td>`;
+    return `<td class="${cl} ${c.click && cv.click ? "c" : ""}" data-col="${i}">${num(cv.v)}</td>`;
+  };
+  let h = `<colgroup><col class="lbl" ${lblW ? `style="width:${lblW}px"` : ""}>${cols.map(c => `<col ${c.bar ? 'class="vcol"' : p.mode === "trend" ? `style="width:${Math.floor(unitW * wt(c))}px"` : ""}>`).join("")}</colgroup><thead><tr><th class="ttl"><div class="t1"><span>${esc(ENTS[ent])}</span><span class="tl"><button class="lnk" id="exp">Expand all</button><button class="lnk" id="col">Collapse all</button><label class="lnk"><input type="checkbox" id="zeros" ${p.zeros ? "checked" : ""}>Zero lines</label></span></div><div class="t2">${esc(sub)}${kMode ? " · $ in thousands" : ""}</div></th>${cols.map(c => `<th class="${c.cls || ""}" title="${esc(c.h)}">${esc(p.mode === "trend" && c.hs ? c.hs : c.h)}</th>`).join("")}</tr></thead><tbody>`;
+  rows.forEach((r, ri) => {
+    const open = r.parent ? p.open.has(r.parent) : false;
+    if (r.kind === "sec") h += `<tr class="sec"><td colspan="${cols.length + 1}">${esc(r.label)}</td></tr>`;
+    else if (r.kind === "grp") h += `<tr class="grp ${p.open.has(r.id) ? "open" : ""}" data-g="${r.id}" data-ri="${ri}"><td title="${esc(r.label)}"><span class="tw">▸</span>${esc(r.label)}</td>${cols.map((c, i) => cellH(c, i, r)).join("")}</tr>`;
+    else if (r.kind === "subh") h += `<tr class="ch subh ${open ? "" : "hide"}" data-p="${r.parent}"><td colspan="${cols.length + 1}">${esc(r.label)}</td></tr>`;
+    else if (r.kind === "acct" || r.kind === "subt" || r.kind === "gtot") h += `<tr class="ch ${r.kind} ${r.depth === 2 ? "d2" : ""} ${open ? "" : "hide"}" data-p="${r.parent}" data-ri="${ri}"><td title="${esc(r.label)}">${esc(r.label)}</td>${cols.map((c, i) => cellH(c, i, r)).join("")}</tr>`;
+    else if (r.kind === "tot") h += `<tr class="tot ${r.cls}" data-ri="${ri}"><td>${esc(r.label)}</td>${cols.map((c, i) => cellH(c, i, r)).join("")}</tr>`;
+    else if (r.kind === "pct") h += `<tr class="pct"><td>${esc(r.label)}</td>${cols.map((c, i) => cellH(c, i, r)).join("")}</tr>`;
+  });
+  box.innerHTML = `<table class="fs ${p.mode === "trend" ? "trend" : ""}">${h}</tbody></table>`;
+  const fs = $("table", box);
   if (T === "soo" && ms.some(x => officeComp(x).unsplit)) $("#fsnote", el).textContent += " Before 2026 the Customer Care / Management split isn't available, so all office pay shows in overhead for those months.";
-  const toggle = (g, on) => { const tr = $(`tr.grp[data-g="${g}"]`, fs); if (!tr) return; on ??= !tr.classList.contains("open"); tr.classList.toggle("open", on); on ? p.open.add(g) : p.open.delete(g); $$(`tr.acct[data-p="${g}"]`, fs).forEach(r => r.classList.toggle("hide", !on)); };
+  // density: when the statement can fit on screen, size rows so Revenue → Net Income is visible without scrolling
+  const fit = () => { const vis = $$("tbody tr", fs).filter(r => !r.classList.contains("hide")).length, top = fs.getBoundingClientRect().top + window.scrollY, th = $("thead", fs).offsetHeight;
+    const avail = window.innerHeight - top - th - 14, rh = Math.floor(avail / Math.max(1, vis));
+    fs.style.setProperty("--rh", `${rh >= 18 ? Math.min(rh, 30) : 28}px`); fs.classList.toggle("dense", rh >= 18 && rh < 24); };
+  const toggle = (g, on, noFit) => { const tr = $(`tr.grp[data-g="${g}"]`, fs); if (!tr) return; on ??= !tr.classList.contains("open"); tr.classList.toggle("open", on); on ? p.open.add(g) : p.open.delete(g); $$(`tr.ch[data-p="${g}"]`, fs).forEach(r => r.classList.toggle("hide", !on)); if (!noFit) fit(); };
   $$("tr.grp td:first-child", fs).forEach(td => td.addEventListener("click", () => toggle(td.parentElement.dataset.g)));
-  const findSpec = id => { for (const it of L) { if (it.k !== "grp") continue; if (it.id === id) return {spec: grpSpec(it), label: it.label}; for (const r of it.rows) if (r.id === id) return {spec: r, label: r.label}; } return null; };
-  $$("td.c", fs).forEach(td => td.addEventListener("click", () => { const f = findSpec(td.dataset.id); if (f) drill(f.spec, ent, cols[+td.dataset.col].ms, f.label); }));
-  wire();
-  $("#exp", el).addEventListener("click", () => L.filter(i => i.k === "grp").forEach(i => toggle(i.id, true)));
-  $("#col", el).addEventListener("click", () => L.filter(i => i.k === "grp").forEach(i => toggle(i.id, false)));
-  $("#csv", el).addEventListener("click", () => downloadCsv(csv, `${stmt} ${ENTS_S[ent]} - ${sub}.csv`));
+  $$("tr.gtot td:first-child", fs).forEach(td => td.addEventListener("click", () => toggle(td.parentElement.dataset.p)));
+  $$("td.c", fs).forEach(td => td.addEventListener("click", () => { const r = rows[+td.parentElement.dataset.ri], sp = rowSpec(r); if (sp) drill(sp, ent, cols[+td.dataset.col].ms, r.kind === "gtot" || r.kind === "subt" ? r.label.replace(/^Total /, "") : r.label); }));
+  wire(); fit();
+  if (views.pl._rs) window.removeEventListener("resize", views.pl._rs);
+  views.pl._rs = () => { if (st.view === "pl" && document.body.contains(fs)) fit(); }; window.addEventListener("resize", views.pl._rs);
+  $("#exp", el).addEventListener("click", () => { L.filter(i => i.k === "grp").forEach(i => toggle(i.id, true, true)); fit(); });
+  $("#col", el).addEventListener("click", () => { L.filter(i => i.k === "grp").forEach(i => toggle(i.id, false, true)); fit(); });
+  const busy = async (btn, fn) => { const t = btn.textContent; btn.disabled = true; btn.textContent = "Preparing…"; try { await fn(); } catch (e) { alertBanner(`Export failed: ${e.message || e}`); } finally { btn.disabled = false; btn.textContent = t; } };
+  $("#xlsx", el).addEventListener("click", e => busy(e.currentTarget, () => exportExcel(ctx)));
+  $("#pdf", el).addEventListener("click", e => busy(e.currentTarget, () => exportPdf(ctx)));
 };
+
+/* ---------- statement model shared by the screen, Excel and PDF */
+const fNk = v => { if (v == null || !isFinite(v) || Math.abs(v) < 50) return "–"; const s = Math.abs(v / 1000).toLocaleString("en-US", {minimumFractionDigits: 1, maximumFractionDigits: 1}); return v < 0 ? `(${s})` : s; };
+function stmtRows(L, isZero, zeros, withPct, isZeroD = isZero) {
+  const out = [], vis = r => zeros || !(r.t === "acct" ? isZeroD(r.id) : isZero(r.id));
+  for (const it of L) {
+    if (it.k === "sec") out.push({kind: "sec", label: it.label});
+    else if (it.k === "grp") {
+      if (!zeros && isZero(it.id) && it.rows.every(r => isZero(r.id))) continue;
+      const g = it.id, good = it.good, ar = (r, depth) => ({kind: "acct", id: r.id, label: r.label, parent: g, depth, r, good});
+      out.push({kind: "grp", id: g, label: it.label, good, it});
+      if (it.subs && it.subs.length) {
+        for (const sb of it.subs) { const rs = it.rows.filter(r => r.sg === sb.id && vis(r)); if (!rs.length) continue;
+          out.push({kind: "subh", id: sb.id + ":h", label: sb.label, parent: g});
+          rs.forEach(r => out.push(ar(r, 2)));
+          out.push({kind: "subt", id: sb.id, label: `Total ${sb.label}`, parent: g, good, list: rs.filter(r => r.t === "acct").map(r => r.a), depth: 1}); }
+        it.rows.filter(r => !r.sg && vis(r)).forEach(r => out.push(ar(r, 1)));
+      } else it.rows.filter(vis).forEach(r => out.push(ar(r, 1)));
+      out.push({kind: "gtot", id: g, label: `Total ${it.label}`, parent: g, good, it});
+    } else if (it.k === "tot") out.push({kind: "tot", id: it.id, label: it.label, good: it.good, cls: it.cls || "", parts: it.parts});
+    else if (it.k === "pct" && withPct) out.push({kind: "pct", label: it.label, num: it.num, den: it.den});
+  }
+  return out;
+}
+const rowSpec = r => r.kind === "grp" || r.kind === "gtot" ? grpSpec(r.it) : r.kind === "subt" ? {t: "accts", list: r.list} : r.kind === "acct" ? r.r : null;
+/* value of one cell: {k: amt|var|vp|pr|pct|pts, v} or {blank}/{dash} */
+function stmtCell(ctx, c, i, row) {
+  const {cols, data, basis} = ctx, id = row.id;
+  if (row.kind === "sec" || row.kind === "subh") return {blank: true};
+  if (row.kind === "pct") {
+    if (c.ms) return {k: "pct", v: data[i][row.den] ? data[i][row.num] / data[i][row.den] : null};
+    if (c.v) { const a = data[c.v[0]], b = data[c.v[1]]; return {k: "pts", v: (a[row.den] ? a[row.num] / a[row.den] : 0) - (b[row.den] ? b[row.num] / b[row.den] : 0)}; }
+    return {blank: true}; }
+  const budCol = cc => cc.f === "b" || (cc.cmp && basis === "bud");
+  const det = row.kind === "subt" || (row.kind === "acct" && (row.r.nb || row.r.t === "acct"));
+  if (det && budCol(c) && c.ms) return {dash: true};
+  if (det && (c.v || c.vp) && budCol(cols[(c.v || c.vp)[1]])) return {blank: true};
+  if (c.v) return {k: "var", v: (data[c.v[0]][id] || 0) - (data[c.v[1]][id] || 0)};
+  if (c.vp) { const a = data[c.vp[0]][id] || 0, b = data[c.vp[1]][id] || 0; return {k: "vp", v: Math.abs(b) > .5 ? pctOf(a, b) : null, d: a - b}; }
+  if (c.pr != null) { const rv = data[c.pr].rev || 0, a = data[c.pr][id] || 0; return {k: "pr", v: rv && Math.abs(a) > .5 ? a / rv : null}; }
+  return {k: "amt", v: data[i][id] || 0, click: row.kind !== "tot"};
+}
+function alertBanner(msg) { const b = document.createElement("div"); b.className = "banner"; b.textContent = msg; $("#banners").prepend(b); setTimeout(() => b.remove(), 9000); }
+function loadLib(name, urls, test) {
+  if (test()) return Promise.resolve();
+  return urls.reduce((pr, u) => pr.then(() => test() ? null : new Promise(ok => { const s = document.createElement("script"); s.src = u; s.onload = ok; s.onerror = ok; document.head.appendChild(s); })), Promise.resolve())
+    .then(() => { if (!test()) throw new Error(`${name} couldn't be loaded (check the internet connection)`); });
+}
+const libExcel = () => loadLib("The Excel library", ["https://cdnjs.cloudflare.com/ajax/libs/exceljs/4.4.0/exceljs.min.js", "https://cdn.jsdelivr.net/npm/exceljs@4.4.0/dist/exceljs.min.js"], () => window.ExcelJS);
+const libPdf = () => loadLib("The PDF library", ["https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.2/jspdf.umd.min.js", "https://cdn.jsdelivr.net/npm/jspdf@2.5.2/dist/jspdf.umd.min.js"], () => window.jspdf);
+let LOGO = null;
+async function logoData() { if (LOGO) return LOGO;
+  const b = await (await fetch("logo.png")).blob(), url = await new Promise(r => { const fr = new FileReader(); fr.onload = () => r(fr.result); fr.readAsDataURL(b); });
+  const img = await new Promise(r => { const i = new Image(); i.onload = () => r(i); i.src = url; }); return (LOGO = {url, w: img.naturalWidth, h: img.naturalHeight}); }
+function periodLine(ctx) { const [y, mo] = ctx.actM.split("-").map(Number), end = `${MNL[mo - 1]} ${new Date(y, mo, 0).getDate()}, ${y}`;
+  if (ctx.mode === "month") return `For the Month Ended ${end}`;
+  const W = ["One", "Two", "Three", "Four", "Five", "Six", "Seven", "Eight", "Nine", "Ten", "Eleven", "Twelve"];
+  return mo === 12 ? `For the Year Ended ${end}` : `For the ${W[mo - 1]} Months Ended ${end}`; }
+const fileStem = ctx => `GFS ${ctx.stmt} - ${ENTS_S[ctx.ent]} - ${ctx.mode === "month" ? ymLabel(ctx.actM, true) : ctx.mode === "ytd" ? "YTD " + ymLabel(ctx.actM, true) : "Trend " + ctx.actM.slice(0, 4)}`;
+function saveBlob(blob, name) { const a = document.createElement("a"); a.href = URL.createObjectURL(blob); a.download = name.replace(/[\\/:*?"<>|]/g, "-"); document.body.appendChild(a); a.click(); setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 1500); }
+
+/* ---------- Excel: every group expanded with Excel outline buttons; subtotals and totals are formulas */
+async function exportExcel(ctx) {
+  await libExcel();
+  const {cols, rows, data} = ctx, wb = new ExcelJS.Workbook(); wb.creator = "GFS Financials Dashboard";
+  const land = ctx.mode === "trend" || cols.length > 6;
+  const ws = wb.addWorksheet(ENTS_S[ctx.ent], {views: [{state: "frozen", ySplit: 7, showGridLines: false}],
+    pageSetup: {orientation: land ? "landscape" : "portrait", fitToPage: true, fitToWidth: 1, fitToHeight: 0, margins: {left: .5, right: .5, top: .6, bottom: .6, header: .3, footer: .3}, printTitlesRow: "7:7"},
+    properties: {outlineProperties: {summaryBelow: true}}});
+  ws.headerFooter.oddFooter = `&L&8GFS Logistics · ${ctx.stmt}&C&8Page &P of &N&R&8Prepared from Sage Intacct`;
+  const F = "Arial", NF = '#,##0_);(#,##0);"–"_)', PF = '0.0%_);(0.0%);"–"_)', last = cols.length + 1, colL = n => ws.getColumn(n).letter;
+  ws.getColumn(1).width = ctx.mode === "trend" ? 44 : 52; cols.forEach((c, i) => ws.getColumn(i + 2).width = c.mon ? 12 : c.vp || c.pr != null ? 10 : 15);
+  try { const lg = await logoData(); const id = wb.addImage({base64: lg.url, extension: "png"}); ws.addImage(id, {tl: {col: 0, row: 0}, ext: {width: 150, height: 150 * lg.h / lg.w}}); } catch {}
+  const title = (r, text, sz, bold, italic) => { ws.mergeCells(r, 1, r, last); const c = ws.getCell(r, 1); c.value = text; c.font = {name: F, size: sz, bold, italic, color: {argb: "FF0B1F3A"}}; c.alignment = {horizontal: "center"}; };
+  title(1, "GFS Logistics", 14, true); title(2, ctx.stmt, 12, true); title(3, ENTS[ctx.ent], 10); title(4, periodLine(ctx), 10, false, true);
+  title(5, "(Unaudited)", 8, false, true); ws.getRow(1).height = 22;
+  const HR = 7, hr = ws.getRow(HR); hr.getCell(1).value = ""; cols.forEach((c, i) => { const cl = hr.getCell(i + 2); cl.value = c.h; cl.font = {name: F, size: 9, bold: true}; cl.alignment = {horizontal: "right", wrapText: true}; cl.border = {bottom: {style: "thin"}}; });
+  hr.getCell(1).border = {bottom: {style: "thin"}}; hr.height = 26;
+  // Excel rows: everything expanded (collapsed groups are folded with the outline buttons)
+  const out = rows.filter(r => r.kind !== "pct" || true), rowOf = {}, gStart = {}, sStart = {};
+  let R = HR + 1; const pending = [];
+  const amtIdx = cols.map((c, i) => c.ms ? i : -1).filter(i => i >= 0), actIdx = cols.findIndex(c => c.act || c.ytd), revRow = () => rowOf["tot:rev"];
+  for (const r of out) {
+    const xr = ws.getRow(R), lab = xr.getCell(1); lab.value = r.label; lab.font = {name: F, size: 9};
+    const ind = r.kind === "acct" ? (r.depth === 2 ? 3 : 2) : r.kind === "subh" || r.kind === "subt" ? 1 : 0; lab.alignment = {indent: ind};
+    if (r.kind === "sec") { lab.value = r.label.toUpperCase(); lab.font = {name: F, size: 8.5, bold: true, color: {argb: "FF5B6B80"}}; if (R > HR + 1) ws.getRow(R).height = 18; }
+    if (r.kind === "grp") { lab.font = {name: F, size: 9, bold: true}; gStart[r.id] = R + 1; xr.outlineLevel = 1; if (!ctx.open.has(r.id)) xr.hidden = true; }
+    if (r.kind === "subh") { lab.font = {name: F, size: 9, italic: true}; sStart[r.id.replace(/:h$/, "")] = R + 1; }
+    if (r.kind === "acct" || r.kind === "subh" || r.kind === "subt") { xr.outlineLevel = r.depth === 2 && r.kind === "acct" ? 2 : 1; if (!ctx.open.has(r.parent)) xr.hidden = true; }
+    if (r.kind === "subt" || r.kind === "gtot") lab.font = {name: F, size: 9, bold: r.kind === "gtot"};
+    if (r.kind === "tot") lab.font = {name: F, size: 9.5, bold: true};
+    if (r.kind === "gtot") rowOf["g:" + r.id] = R; if (r.kind === "tot") rowOf["tot:" + r.id] = R; if (r.kind === "subt") rowOf["s:" + r.id] = R;
+    pending.push([R, r]); R++;
+  }
+  const ref = (key, ci) => rowOf[key] ? `${colL(ci + 2)}${rowOf[key]}` : "0";
+  const partRef = (id, ci) => rowOf["g:" + id] ? ref("g:" + id, ci) : rowOf["tot:" + id] ? ref("tot:" + id, ci) : "0";
+  for (const [Rr, r] of pending) {
+    if (r.kind === "sec" || r.kind === "subh" || r.kind === "grp") continue;
+    const xr = ws.getRow(Rr);
+    cols.forEach((c, i) => {
+      const cell = xr.getCell(i + 2), L1 = colL(i + 2); cell.font = {name: F, size: 9, bold: r.kind === "tot" || r.kind === "gtot"};
+      if (r.kind === "pct") { if (c.ms) { const n = partRef(r.num, i), d = partRef(r.den, i); cell.value = {formula: `IF(${d}=0,"",${n}/${d})`}; cell.numFmt = PF; cell.font = {name: F, size: 8.5, italic: true}; } return; }
+      const cv = stmtCell(ctx, c, i, r); if (cv.blank || cv.dash) return;
+      if (c.ms) {
+        if (r.kind === "acct") cell.value = r2(cv.v);
+        else if (r.kind === "subt") cell.value = {formula: `SUM(${L1}${sStart[r.id]}:${L1}${Rr - 1})`, result: r2(cv.v)};
+        else if (r.kind === "gtot") { const subs = pending.filter(([, x]) => x.kind === "subt" && x.parent === r.id), loose = pending.filter(([, x]) => x.kind === "acct" && x.parent === r.id && x.depth === 1);
+          const budOnly = c.f === "b" || (c.cmp && ctx.basis === "bud");
+          if (budOnly) cell.value = r2(cv.v);
+          else if (subs.length) cell.value = {formula: [...subs, ...loose].map(([q]) => `${L1}${q}`).join("+"), result: r2(cv.v)};
+          else cell.value = {formula: `SUM(${L1}${gStart[r.id]}:${L1}${Rr - 1})`, result: r2(cv.v)}; }
+        else if (r.kind === "tot") cell.value = {formula: r.parts.map(([id, sg], k) => `${sg < 0 ? "-" : k ? "+" : ""}${partRef(id, i)}`).join(""), result: r2(cv.v)};
+        if (c.ytd && r.kind !== "tot") { const ms = cols.map((x, k) => x.mon ? k : -1).filter(k => k >= 0); if (ms.length) cell.value = {formula: `SUM(${colL(ms[0] + 2)}${Rr}:${colL(ms.at(-1) + 2)}${Rr})`, result: r2(cv.v)}; }
+        cell.numFmt = NF;
+      } else if (c.v) { cell.value = {formula: `${colL(c.v[0] + 2)}${Rr}-${colL(c.v[1] + 2)}${Rr}`, result: r2(cv.v)}; cell.numFmt = NF; }
+      else if (c.vp) { const a = `${colL(c.vp[0] + 2)}${Rr}`, b = `${colL(c.vp[1] + 2)}${Rr}`; cell.value = {formula: `IF(${b}=0,"",(${a}-${b})/ABS(${b}))`}; cell.numFmt = PF; }
+      else if (c.pr != null && revRow()) { const a = `${colL(c.pr + 2)}${Rr}`, rv = `$${colL(c.pr + 2)}$${revRow()}`; cell.value = {formula: `IF(${rv}=0,"",${a}/${rv})`}; cell.numFmt = PF; }
+      cell.alignment = {horizontal: "right"};
+      if (r.kind === "subt" || r.kind === "gtot" || r.kind === "tot") cell.border = {top: {style: "thin"}};
+      if (r.kind === "tot" && r.cls === "final") cell.border = {top: {style: "thin"}, bottom: {style: "double"}};
+    });
+    if (r.kind === "tot" && r.cls) xr.eachCell({includeEmpty: true}, (cl, n) => { if (n <= last) cl.fill = {type: "pattern", pattern: "solid", fgColor: {argb: r.cls === "final" ? "FFDCE6F2" : "FFF1F5FA"}}; });
+  }
+  const nr = ws.getRow(R + 1).getCell(1); nr.value = `Prepared from the Sage Intacct general ledger on ${new Date().toLocaleDateString("en-US", {month: "long", day: "numeric", year: "numeric"})}. ${ctx.basis === "bud" && ctx.mode !== "trend" ? "Budgets are compared at the category level." : ""}`; nr.font = {name: F, size: 8, italic: true, color: {argb: "FF6B7A90"}};
+  const buf = await wb.xlsx.writeBuffer();
+  saveBlob(new Blob([buf], {type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"}), fileStem(ctx) + ".xlsx");
+}
+
+/* ---------- PDF: auditor-style statement; one portrait page when it fits, otherwise landscape without splitting a group */
+async function exportPdf(ctx) {
+  await libPdf();
+  const {cols} = ctx, rows = ctx.rows.filter(r => r.kind === "sec" || r.kind === "grp" || r.kind === "tot" || r.kind === "pct" || ctx.open.has(r.parent));
+  const shown = rows.map(r => r.kind === "grp" && ctx.open.has(r.id) ? {...r, open: true} : r);
+  const {jsPDF} = window.jspdf, lg = await logoData().catch(() => null);
+  const W0 = 612, H0 = 792, mg = 40, headH = 108, footH = 30;
+  const unit = r => r.kind === "sec" ? 1.25 : 1;
+  const totalU = shown.reduce((s, r) => s + unit(r), 0);
+  let land = ctx.mode === "trend" || cols.length > 6, rh;
+  if (!land) { rh = Math.min(14, (H0 - 2 * mg - headH - footH - 20) / totalU); if (rh < 9.6) { land = true; } }
+  const PW = land ? H0 : W0, PH = land ? W0 : H0;
+  if (land) rh = Math.min(13.5, Math.max(9, (PH - 2 * mg - headH - footH - 4) / totalU));
+  const fs = Math.max(6.6, Math.min(9, rh * .66));
+  const doc = new jsPDF({orientation: land ? "landscape" : "portrait", unit: "pt", format: "letter"});
+  const ink = [11, 31, 58], mute = [91, 107, 128];
+  const labW = ctx.mode === "trend" ? Math.min(190, PW * .24) : PW * .36, nW = (PW - 2 * mg - labW) / cols.length;
+  const k = ctx.mode === "trend" && nW < 40, num = v => k ? fNk(v) : fN(v);
+  const x0 = mg, xr = i => mg + labW + nW * (i + 1) - 4;
+  const header = (pg) => {
+    if (lg) { const h = 30, w = h * lg.w / lg.h; doc.addImage(lg.url, "PNG", mg, mg - 6, w, h); }
+    doc.setTextColor(...ink); doc.setFont("times", "bold"); doc.setFontSize(13); doc.text("GFS Logistics", PW / 2, mg + 4, {align: "center"});
+    doc.setFontSize(12); doc.text(ctx.stmt, PW / 2, mg + 20, {align: "center"});
+    doc.setFont("times", "normal"); doc.setFontSize(10); doc.text(ENTS[ctx.ent], PW / 2, mg + 34, {align: "center"});
+    doc.setFont("times", "italic"); doc.text(periodLine(ctx) + (k ? " · $ in thousands" : ""), PW / 2, mg + 47, {align: "center"});
+    doc.setFontSize(8); doc.setTextColor(...mute); doc.text("(Unaudited)", PW / 2, mg + 58, {align: "center"});
+    const yh = mg + headH - 14; doc.setTextColor(...ink); doc.setFont("times", "bold"); doc.setFontSize(Math.min(8.5, fs));
+    cols.forEach((c, i) => { const lines = doc.splitTextToSize(c.h, nW - 6); lines.forEach((ln, j) => doc.text(ln, xr(i), yh - (lines.length - 1 - j) * (fs + 1), {align: "right"})); });
+    doc.setDrawColor(...ink); doc.setLineWidth(.6); doc.line(mg, yh + 4, PW - mg, yh + 4);
+    return yh + 4 + rh * .95;
+  };
+  const footer = (pg, n) => { doc.setFont("times", "italic"); doc.setFontSize(7.5); doc.setTextColor(...mute);
+    doc.text(`Prepared from the Sage Intacct general ledger · ${new Date().toLocaleDateString("en-US", {month: "long", day: "numeric", year: "numeric"})} · Confidential`, mg, PH - mg + 12);
+    doc.text(`Page ${pg} of ${n}`, PW - mg, PH - mg + 12, {align: "right"}); };
+  // blocks keep a section title with what follows and an expanded group together
+  const blocks = []; let cur = [];
+  shown.forEach((r, i) => { cur.push(r); const nx = shown[i + 1]; const inGrp = r.parent && nx && nx.parent === r.parent || (r.kind === "grp" && r.open);
+    if (r.kind === "sec" || inGrp) return; blocks.push(cur); cur = []; });
+  if (cur.length) blocks.push(cur);
+  const pages = [[]]; let used = 0; const cap = PH - 2 * mg - headH - footH;
+  blocks.forEach(b => { const hgt = b.reduce((s, r) => s + unit(r) * rh, 0); if (used + hgt > cap && pages.at(-1).length) { pages.push([]); used = 0; } pages.at(-1).push(...b); used += hgt; });
+  pages.forEach((pr, pi) => {
+    if (pi) doc.addPage(); let y = header(pi + 1);
+    pr.forEach(r => {
+      const yy = y + (r.kind === "sec" ? rh * .5 : 0);
+      doc.setTextColor(...ink);
+      if (r.kind === "sec") { doc.setFont("times", "bold"); doc.setFontSize(fs * .92); doc.setTextColor(...mute); doc.text(r.label.toUpperCase(), x0, yy); y += unit(r) * rh; return; }
+      const ind = r.kind === "acct" ? (r.depth === 2 ? 22 : 12) : r.kind === "subh" || r.kind === "subt" ? 12 : 0;
+      const bold = r.kind === "tot" || r.kind === "gtot" || (r.kind === "grp" && r.open), ital = r.kind === "pct" || r.kind === "subh";
+      doc.setFont("times", bold ? "bold" : ital ? "italic" : "normal"); doc.setFontSize(r.kind === "acct" ? fs * .95 : fs);
+      const lab = doc.splitTextToSize(r.label, labW - ind - 6)[0]; doc.text(lab, x0 + ind, yy);
+      if (!(r.kind === "grp" && r.open) && r.kind !== "subh") cols.forEach((c, i) => {
+        const cv = stmtCell(ctx, c, i, r); if (cv.blank) return; let t;
+        if (cv.dash) t = "–"; else if (cv.k === "amt" || cv.k === "var") t = Math.abs(cv.v) < .5 ? "–" : num(cv.v); else if (cv.k === "vp") t = cv.v == null ? "–" : fP(cv.v, 1, true).replace("−", "-");
+        else if (cv.k === "pr" || cv.k === "pct") t = cv.v == null ? "–" : fP(cv.v).replace("−", "-"); else if (cv.k === "pts") t = fPts(cv.v).replace("−", "-"); else t = "";
+        doc.text(t, xr(i), yy, {align: "right"});
+        if (r.kind === "subt" || r.kind === "gtot" || r.kind === "tot") { doc.setLineWidth(.4); doc.setDrawColor(...ink); const lx = xr(i) - nW + 10; doc.line(lx, yy - rh * .72, xr(i), yy - rh * .72);
+          if (r.cls === "final") { doc.line(lx, yy + 3, xr(i), yy + 3); doc.line(lx, yy + 4.6, xr(i), yy + 4.6); } } });
+      y += unit(r) * rh;
+    });
+    footer(pi + 1, pages.length);
+  });
+  saveBlob(doc.output("blob"), fileStem(ctx) + ".pdf");
+}
+
 function heatmap(box, T, ent, ms, el) {
   const L = layoutDef(T, ent), rows = L.filter(i => i.k === "grp" || (i.k === "tot" && i.cls));
   const A = ms.map(x => computeCol(T, ent, [x], "a")), B = ms.map(x => computeCol(T, ent, [x], "b"));
@@ -770,13 +989,18 @@ views.sales = el => {
       rs.forEach(r => csv.push([r.name, r.div, lab, r2(r.m), r2(r.mb), r2(r.m - r.mb), r2(r.m - r.p), r2(r.ya), r2(r.yb), r2(r.ya - r.yb)])); }
     h += `<tr class="tot"><td colspan="2">TOTAL SALES</td><td class="num">${fN(T.m)}</td><td class="num">${fN(T.mb)}</td>${vcell(T.m, T.mb)}<td></td><td class="num">${fN(T.ya)}</td><td class="num">${fN(T.yb)}</td>${vcell(T.ya, T.yb)}</tr>`;
   } else {
-    const rs = [...vis].sort((a, b) => b.ya - a.ya);
-    h = `<thead><tr><th>Customer</th><th>Div</th>${ym.map(x => `<th class="num">${MN[+x.slice(5) - 1]}</th>`).join("")}<th class="num">YTD actual</th><th class="num">YTD budget</th><th class="num">Variance</th></tr></thead><tbody>`
+    const so = sv.sort || {k: "ya", dir: -1}, key = r => so.k === "ya" ? r.ya : so.k === "yb" ? r.yb : so.k === "var" ? r.ya - r.yb : so.k === "name" ? r.name.toLowerCase() : (r.act[+so.k] || 0);
+    const rs = [...vis].sort((a, b) => { const x = key(a), y = key(b); return (x > y ? 1 : x < y ? -1 : 0) * so.dir || b.ya - a.ya; });
+    const sh = (k, lab, n = true) => `<th class="${n ? "num" : ""} sortable ${so.k === String(k) ? "sorted" : ""}" data-sk="${k}" title="Sort">${lab}${so.k === String(k) ? `<span class="sarr">${so.dir < 0 ? "▼" : "▲"}</span>` : ""}</th>`;
+    h = `<thead><tr>${sh("name", "Customer", false)}<th>Div</th>${ym.map((x, i) => sh(i, MN[+x.slice(5) - 1])).join("")}${sh("ya", "YTD actual")}${sh("yb", "YTD budget")}${sh("var", "Variance")}</tr></thead><tbody>`
       + rs.map((r, i) => `<tr class="click" data-n="${esc(r.name)}"><td><span class="rank">${i + 1}</span>${esc(r.name)}</td><td><span class="tag neu">${r.div}</span></td>${r.act.map(v => `<td class="num">${Math.abs(v) < .5 ? '<span class="muted">–</span>' : fN(v)}</td>`).join("")}<td class="num"><b>${fN(r.ya)}</b></td><td class="num">${fN(r.yb)}</td>${vcell(r.ya, r.yb)}</tr>`).join("")
       + `<tr class="tot"><td colspan="2">TOTAL SALES</td>${T.act.map(v => `<td class="num">${fN(v)}</td>`).join("")}<td class="num">${fN(T.ya)}</td><td class="num">${fN(T.yb)}</td>${vcell(T.ya, T.yb)}</tr>`;
     csv = [["Customer", "Division", ...ym, "YTD actual", "YTD budget", "Variance"], ...rs.map(r => [r.name, r.div, ...r.act.map(r2), r2(r.ya), r2(r.yb), r2(r.ya - r.yb)])];
   }
-  $("#stbl", el).innerHTML = h + "</tbody>";
+  $("#stbl", el).innerHTML = (sv.mode === "mom" ? `<colgroup><col style="width:210px"><col style="width:50px">${ym.map(() => "<col>").join("")}<col style="width:96px"><col style="width:96px"><col style="width:92px"></colgroup>` : "") + h + "</tbody>";
+  $("#stbl", el).classList.toggle("mom", sv.mode === "mom");
+  $$("#stbl th[data-sk]", el).forEach(th => th.addEventListener("click", () => { const k = th.dataset.sk, cur = sv.sort || {k: "ya", dir: -1};
+    sv.sort = cur.k === k ? {k, dir: -cur.dir} : {k, dir: k === "name" ? 1 : -1}; views.sales(el); }));
   $$("#stbl tr[data-n]", el).forEach(tr => tr.addEventListener("click", () => customerDrawer(tr.dataset.n, rows.find(x => x.name === tr.dataset.n))));
   $$("#sdiv button", el).forEach(b => b.addEventListener("click", () => { sv.div = b.dataset.v; views.sales(el); }));
   $$("#smode button", el).forEach(b => b.addEventListener("click", () => { sv.mode = b.dataset.v; views.sales(el); }));
@@ -795,6 +1019,98 @@ function customerDrawer(name, row) {
     <div class="card" style="margin-bottom:18px"><div class="card-h"><h3>Invoiced by month</h3></div><div id="cch"></div></div>${glr.length ? `<div class="card" style="margin-bottom:18px"><div class="card-h"><h3>Revenue recognized by account (GL)</h3></div><div class="bullets">${ab.html}</div></div>` : ""}
     <div class="tscroll" style="max-height:none;box-shadow:none"><table class="lines"><thead><tr><th>Date</th><th>Document</th><th>Div</th><th>Type</th><th class="num">Amount</th></tr></thead><tbody>${inv.map(x => `<tr><td>${x.d}</td><td>${esc(x.doc)}</td><td>${x.l}</td><td>${x.k === "c" ? "Credit memo" : "Invoice"}</td><td class="num">${f$(x.v, 2)}</td></tr>`).join("")}</tbody></table></div>`);
   barTarget($("#cch"), {labels: MN, actual: byM.map((v, i) => ym[i] <= st.rep ? v : null), target: budArr, sel: +st.rep.slice(5) - 1, height: 220, names: ["Invoiced", "Budget"]});
+}
+
+/* ------------------------------------------------ WAREHOUSE LABOR (employee detail on payroll lines from June 2026) */
+const LAB_T = {"5035-001": "reg", "5035-002": "ot", "5035-003": "pto", "5035-004": "hol", "5035-005": "tax", "5035-006": "pass"};
+const LAB_COLS = [["reg", "Regular"], ["ot", "Overtime"], ["pto", "PTO"], ["hol", "Holiday"], ["tax", "Taxes"], ["pass", "Passthrough"]];
+const labStart = () => M.cfg.laborDetailStart || "2026-06";
+function laborBy(per, div) {
+  const ok = x => per.includes(x.m) && (div === "ALL" || x.l === div), E = new Map(), A = new Map();
+  for (const x of M.lines) {
+    if (!ok(x)) continue;
+    if (x.a.startsWith("5035")) { const k = x.e || "_un", t = LAB_T[x.a] || "other";
+      const o = E.get(k) || {id: k, reg: 0, ot: 0, pto: 0, hol: 0, tax: 0, pass: 0, other: 0, tot: 0, divs: {}, lines: []};
+      o[t] += x.v; o.tot += x.v; if (t === "reg") o.divs[x.l] = (o.divs[x.l] || 0) + x.v; o.lines.push(x); E.set(k, o); }
+    else if (/^50(40|45)/.test(x.a)) { const k = x.vn || "Unspecified agency", t = /-002$/.test(x.a) ? "ot" : x.a === "5045-003" ? "pass" : "reg";
+      const o = A.get(k) || {name: k, reg: 0, ot: 0, pass: 0, tot: 0, ft: 0, tmp: 0, lines: []}; o[t] += x.v; o.tot += x.v; o[x.a.startsWith("5040") ? "ft" : "tmp"] += x.v; o.lines.push(x); A.set(k, o); }
+  }
+  for (const o of E.values()) { const d = Object.entries(o.divs).sort((a, b) => b[1] - a[1])[0]; o.div = d ? d[0] : ""; o.otp = o.reg ? o.ot / o.reg : null; }
+  return {E, A};
+}
+views.labor = el => {
+  const lv = st.labor ||= {per: "month", div: "ALL", sort: {k: "tot", dir: -1}};
+  const m = st.rep, start = labStart(), months = M.months.filter(x => x >= start && x <= m);
+  setTitle("Warehouse labor", "Warehouse labor by employee");
+  if (!months.length) { el.innerHTML = `<div class="banner info">Employee detail on warehouse payroll starts ${ymLabel(start, true)}. Choose ${ymLabel(start, true)} or later as the reporting month.</div>`; return; }
+  const per = lv.per === "month" ? [m] : months, perL = lv.per === "month" ? ymLabel(m, true) : `${ymLabel(months[0])} – ${ymLabel(m)}`;
+  const {E, A} = laborBy(per, lv.div), emps = [...E.values()].filter(o => o.id !== "_un"), un = E.get("_un");
+  const empInfo = id => (M.cfg.employees || {})[id] || {};
+  const sum = (arr, k) => arr.reduce((s, o) => s + (o[k] || 0), 0);
+  const eTot = sum([...E.values()], "tot"), agTot = sum([...A.values()], "tot"), total = eTot + agTot, rev = val("rev", "std", lv.div, per, "a");
+  const eReg = sum(emps, "reg") + (un ? un.reg : 0), eOt = sum(emps, "ot") + (un ? un.ot : 0), aReg = sum([...A.values()], "reg"), aOt = sum([...A.values()], "ot");
+  const paid = emps.filter(o => o.reg > .5);
+  const headCnt = per.reduce((s, x) => s + new Set(M.lines.filter(l => l.m === x && l.a === "5035-001" && l.e && (lv.div === "ALL" || l.l === lv.div) && l.v > 0).map(l => l.e)).size, 0);
+  const avg = headCnt ? sum(emps, "tot") / headCnt : null;
+  // monthly OT% history for every employee (whole period since detail starts), for the heatmap and "months above 8%"
+  const hist = months.map(x => laborBy([x], lv.div).E);
+  const otM = id => hist.map(H => { const o = H.get(id); return o ? {ot: o.ot, reg: o.reg, p: o.reg ? o.ot / o.reg : null} : null; });
+  emps.forEach(o => { o.hi = otM(o.id).filter(c => c && c.p != null && c.p > .08).length; const i = empInfo(o.id); o.name = i.name || o.id; o.pos = i.position || ""; o.status = i.status || ""; });
+  const kt = (label, tag, v, sub) => `<div class="card kpi" style="cursor:default"><div class="k-label"><span>${label}</span>${tag}</div><div class="k-val">${v}</div><div class="k-sub">${sub}</div></div>`;
+  const otAll = (eReg + aReg) ? (eOt + aOt) / (eReg + aReg) : null;
+  el.innerHTML = `<div class="toolbar tight"><label class="ctl"><span>Period</span><div class="seg" id="lper"><button data-v="month" aria-pressed="${lv.per === "month"}">${ymLabel(m)}</button><button data-v="since" aria-pressed="${lv.per === "since"}">Since ${ymLabel(start)}</button></div></label>
+      <label class="ctl"><span>Division</span><div class="seg" id="ldiv">${["ALL", "G1", "G2", "CW"].map(d => `<button data-v="${d}" aria-pressed="${d === lv.div}">${d === "ALL" ? "All" : d}</button>`).join("")}</div></label><span class="sp"></span><button class="btn sm" id="lcsv">Export</button></div>
+    <div class="row g4">
+      ${kt("Total warehouse labor", rev ? `<span class="tag neu">${fP(total / rev)} of rev</span>` : "", fK(total), `${perL} · employees + agency labor`)}
+      ${kt("GFS employees", `<span class="tag neu">${paid.length} paid</span>`, fK(eTot), avg != null ? `${fK(avg)} average per employee per month` : "&nbsp;")}
+      ${kt("Overtime", `<span class="tag ${otAll > .08 ? "bad" : "good"}">${fP(otAll)} of regular</span>`, fK(eOt + aOt), `employees ${fP(eReg ? eOt / eReg : null)} · agency ${fP(aReg ? aOt / aReg : null)}`)}
+      ${kt("Agency labor", `<span class="tag neu">${fP(total ? agTot / total : null, 0)} of labor</span>`, fK(agTot), `temp-to-hire ${fK(sum([...A.values()], "ft"))} · temporary ${fK(sum([...A.values()], "tmp"))}`)}
+    </div>
+    <div class="row g2">${card("Overtime rate by month", "Overtime as a share of regular wages · 8% is a normal month", `<div id="lch"></div>`)}${card(`Most overtime · ${esc(perL)}`, "Overtime dollars by employee · right column = overtime as a share of that person's regular pay", `<div id="ltop"></div>`)}</div>
+    <div class="card" style="margin-bottom:var(--gap)"><div class="card-h"><div><h3>Overtime history by employee</h3><p class="lede">Overtime dollars by month since ${ymLabel(start, true)}. Shading shows overtime as a share of regular pay: amber above 8%, red above 15%. Click a row for that person's detail.</p></div></div><div class="tscroll" style="box-shadow:none;max-height:none"><table class="heat lheat" id="lheat"></table></div></div>
+    <div class="card" style="margin-bottom:var(--gap)"><div class="card-h"><div><h3>Cost by employee · ${esc(perL)}</h3><p class="lede">GFS payroll (accounts 5035) by employee and pay type. Click a column to sort, a row for the journal lines.</p></div></div><div class="tscroll" style="box-shadow:none;max-height:none"><table class="data" id="ltbl"></table></div></div>
+    ${A.size ? `<div class="card"><div class="card-h"><div><h3>Agency labor · ${esc(perL)}</h3><p class="lede">Temp-to-hire (5040) and temporary labor (5045) billed by staffing agencies. Click a row for the bills.</p></div></div><div class="tscroll" style="box-shadow:none;max-height:none"><table class="data" id="latbl"></table></div></div>` : ""}`;
+  // chart: OT % by month
+  const otSer = (pick) => months.map((x, i) => { let r = 0, o = 0; if (pick === "e") { for (const v of hist[i].values()) { r += v.reg; o += v.ot; } } else { const {A: a} = laborBy([x], lv.div); for (const v of a.values()) { r += v.reg; o += v.ot; } } return r ? o / r : null; });
+  lineChart($("#lch", el), {labels: months.map(x => MN[+x.slice(5) - 1]), fmt: v => fP(v, 0), height: 250, ref: {value: .08, label: "8% norm"}, series: [{name: "GFS employees", short: "Employees", color: "var(--c1)", values: otSer("e")}, {name: "Agency labor", short: "Agency", color: "var(--c2)", values: otSer("a")}]});
+  const top = [...emps].sort((a, b) => b.ot - a.ot).filter(o => o.ot > .5).slice(0, 10);
+  const tb = bullets(top.map(o => ({label: `${o.name}`, v: o.ot, note: fP(o.otp, 0), color: o.otp > .15 ? "var(--bad)" : o.otp > .08 ? "var(--gold)" : "var(--c1)", id: o.id})), {fmt: v => fK(v), onClick: it => empDrawer(it.id, per, lv.div), head: ["Employee", "Overtime", "OT %"]});
+  $("#ltop", el).innerHTML = top.length ? `<div class="bullets">${tb.html}</div>` : `<p class="muted">No overtime in this period.</p>`; tb.bind($("#ltop", el));
+  // heatmap
+  const hm = [...emps].map(o => ({o, c: otM(o.id)})).map(x => ({...x, ot: x.c.reduce((s, c) => s + (c ? c.ot : 0), 0), reg: x.c.reduce((s, c) => s + (c ? c.reg : 0), 0)})).filter(x => x.ot > .5 || x.reg > .5).sort((a, b) => b.ot - a.ot);
+  const shade = p => p == null || p <= .08 ? "transparent" : `color-mix(in srgb,${p > .15 ? "var(--bad)" : "var(--gold)"} ${Math.round(18 + Math.min(1, (p - .08) / .22) * 40)}%,var(--surface))`;
+  $("#lheat", el).innerHTML = `<thead><tr><th>Employee</th><th class="l">Position</th>${months.map(x => `<th>${MN[+x.slice(5) - 1]}</th>`).join("")}<th>Total OT</th><th>OT %</th><th>Months &gt;8%</th></tr></thead><tbody>${hm.map(x => `<tr class="click" data-e="${esc(x.o.id)}"><td>${esc(x.o.name)}${x.o.status === "Terminated" ? ' <span class="tag neu">former</span>' : ""}</td><td class="l muted">${esc(x.o.pos)}</td>${x.c.map((c, i) => `<td class="h" style="background:${shade(c && c.p)}" title="${esc(x.o.name)} · ${ymLabel(months[i], true)}: overtime ${c ? f$(c.ot) : "$0"} on regular pay of ${c ? f$(c.reg) : "$0"}${c && c.p != null ? ` (${fP(c.p)})` : ""}">${c && c.ot > .5 ? fK(c.ot) : '<span class="muted">·</span>'}</td>`).join("")}<td class="h"><b>${fK(x.ot)}</b></td><td class="h" style="background:${shade(x.reg ? x.ot / x.reg : null)}">${fP(x.reg ? x.ot / x.reg : null, 0)}</td><td class="h">${x.o.hi} of ${months.length}</td></tr>`).join("")}</tbody>`;
+  // employee table
+  const so = lv.sort, key = o => so.k === "name" ? o.name.toLowerCase() : so.k === "pos" ? o.pos : so.k === "div" ? o.div : so.k === "otp" ? (o.otp ?? -1) : so.k === "hi" ? o.hi : (o[so.k] || 0);
+  const er = [...emps].filter(o => Math.abs(o.tot) > .5).sort((a, b) => { const x = key(a), y = key(b); return (x > y ? 1 : x < y ? -1 : 0) * so.dir; });
+  const sh = (k, lab, n = true) => `<th class="${n ? "num" : ""} sortable ${so.k === k ? "sorted" : ""}" data-sk="${k}">${lab}${so.k === k ? `<span class="sarr">${so.dir < 0 ? "▼" : "▲"}</span>` : ""}</th>`;
+  const tr = (o, lab, extra = "") => `<td class="num">${fN(o.reg)}</td><td class="num">${fN(o.ot)}</td><td class="num">${fN(o.pto)}</td><td class="num">${fN(o.hol)}</td><td class="num">${fN(o.tax)}</td><td class="num">${fN(o.pass)}</td><td class="num"><b>${fN(o.tot)}</b></td><td class="num ${o.otp > .15 ? "neg" : ""}">${fP(o.otp, 0)}</td>${extra}`;
+  const tt = {reg: 0, ot: 0, pto: 0, hol: 0, tax: 0, pass: 0, tot: 0}; [...E.values()].forEach(o => Object.keys(tt).forEach(k => tt[k] += o[k] || 0)); tt.otp = tt.reg ? tt.ot / tt.reg : null;
+  $("#ltbl", el).innerHTML = `<thead><tr>${sh("name", "Employee", false)}${sh("pos", "Position", false)}${sh("div", "Div", false)}${sh("reg", "Regular")}${sh("ot", "Overtime")}${sh("pto", "PTO")}${sh("hol", "Holiday")}${sh("tax", "Taxes")}${sh("pass", "Passthrough")}${sh("tot", "Total")}${sh("otp", "OT %")}${sh("hi", "Months &gt;8%")}</tr></thead><tbody>
+    ${er.map(o => `<tr class="click" data-e="${esc(o.id)}"><td>${esc(o.name)}${o.status === "Terminated" ? ' <span class="tag neu">former</span>' : ""}</td><td class="muted">${esc(o.pos)}</td><td><span class="tag neu">${esc(o.div || "–")}</span></td>${tr(o)}<td class="num">${o.hi} of ${months.length}</td></tr>`).join("")}
+    ${un && Math.abs(un.tot) > .5 ? `<tr class="click" data-e="_un"><td colspan="3"><i>Not assigned to an employee</i> <span class="muted small">accruals, reclasses, passthrough entries</span></td>${tr({...un, otp: null})}<td></td></tr>` : ""}
+    <tr class="tot"><td colspan="3">Total GFS payroll</td>${tr(tt)}<td></td></tr></tbody>`;
+  $$("#ltbl th[data-sk]", el).forEach(th => th.addEventListener("click", () => { const k = th.dataset.sk; lv.sort = lv.sort.k === k ? {k, dir: -lv.sort.dir} : {k, dir: ["name", "pos", "div"].includes(k) ? 1 : -1}; views.labor(el); }));
+  $$("#ltbl tr[data-e], #lheat tr[data-e]", el).forEach(r => r.addEventListener("click", () => empDrawer(r.dataset.e, r.closest("#lheat") ? months : per, lv.div)));
+  if (A.size) { const ag = [...A.values()].sort((a, b) => b.tot - a.tot), at = {reg: sum(ag, "reg"), ot: sum(ag, "ot"), pass: sum(ag, "pass"), tot: sum(ag, "tot")};
+    $("#latbl", el).innerHTML = `<thead><tr><th>Agency</th><th class="num">Temp-to-hire</th><th class="num">Temporary</th><th class="num">Regular</th><th class="num">Overtime</th><th class="num">Passthrough</th><th class="num">Total</th><th class="num">OT %</th></tr></thead><tbody>${ag.map((o, i) => `<tr class="click" data-i="${i}"><td>${esc(o.name)}</td><td class="num">${fN(o.ft)}</td><td class="num">${fN(o.tmp)}</td><td class="num">${fN(o.reg)}</td><td class="num">${fN(o.ot)}</td><td class="num">${fN(o.pass)}</td><td class="num"><b>${fN(o.tot)}</b></td><td class="num">${fP(o.reg ? o.ot / o.reg : null, 0)}</td></tr>`).join("")}<tr class="tot"><td>Total agency labor</td><td class="num">${fN(sum(ag, "ft"))}</td><td class="num">${fN(sum(ag, "tmp"))}</td><td class="num">${fN(at.reg)}</td><td class="num">${fN(at.ot)}</td><td class="num">${fN(at.pass)}</td><td class="num">${fN(at.tot)}</td><td class="num">${fP(at.reg ? at.ot / at.reg : null, 0)}</td></tr></tbody>`;
+    $$("#latbl tr[data-i]", el).forEach(r => r.addEventListener("click", () => { const o = ag[+r.dataset.i]; const ls = [...o.lines].sort((a, b) => a.d < b.d ? 1 : -1);
+      openDrawer(`Agency labor · ${perL}`, o.name, `<div class="stats" style="--n:3;margin-bottom:18px"><div class="stat"><div class="sl">Total</div><div class="sv">${f$(o.tot)}</div><div class="ss">${esc(perL)}</div></div><div class="stat"><div class="sl">Overtime</div><div class="sv">${f$(o.ot)}</div><div class="ss">${fP(o.reg ? o.ot / o.reg : null)} of regular</div></div><div class="stat"><div class="sl">Bill lines</div><div class="sv">${ls.length}</div><div class="ss">from Sage Intacct</div></div></div>${linesTable(ls)}`); })); }
+  $$("#lper button", el).forEach(b => b.addEventListener("click", () => { lv.per = b.dataset.v; views.labor(el); }));
+  $$("#ldiv button", el).forEach(b => b.addEventListener("click", () => { lv.div = b.dataset.v; views.labor(el); }));
+  $("#lcsv", el).addEventListener("click", () => downloadCsv([["Employee", "ID", "Position", "Division", "Status", "Regular", "Overtime", "PTO", "Holiday", "Taxes", "Passthrough", "Total", "OT % of regular", `Months above 8% (of ${months.length})`],
+    ...er.map(o => [o.name, o.id, o.pos, o.div, o.status, r2(o.reg), r2(o.ot), r2(o.pto), r2(o.hol), r2(o.tax), r2(o.pass), r2(o.tot), o.otp == null ? "" : r2(o.otp * 100) / 100, o.hi]),
+    ...(un ? [["Not assigned to an employee", "", "", "", "", r2(un.reg), r2(un.ot), r2(un.pto), r2(un.hol), r2(un.tax), r2(un.pass), r2(un.tot), "", ""]] : [])], `Warehouse labor ${lv.div} ${perL}.csv`));
+};
+function empDrawer(id, per, div) {
+  const info = (M.cfg.employees || {})[id] || {}, name = id === "_un" ? "Not assigned to an employee" : info.name || id;
+  const ls = M.lines.filter(x => x.a.startsWith("5035") && per.includes(x.m) && (div === "ALL" || x.l === div) && (id === "_un" ? !x.e : x.e === id)).sort((a, b) => a.d < b.d ? 1 : -1);
+  const by = t => per.map(x => ls.filter(l => l.m === x && LAB_T[l.a] === t).reduce((s, l) => s + l.v, 0));
+  const reg = by("reg"), ot = by("ot"), tot = ls.reduce((s, l) => s + l.v, 0), sR = reg.reduce((a, b) => a + b, 0), sO = ot.reduce((a, b) => a + b, 0);
+  const perL = per.length === 1 ? ymLabel(per[0], true) : `${ymLabel(per[0])} – ${ymLabel(per.at(-1))}`;
+  openDrawer(`Warehouse labor · ${perL}`, `${name}${info.position ? " · " + info.position : ""}`, `<div class="stats" style="--n:4;margin-bottom:18px"><div class="stat"><div class="sl">Total cost</div><div class="sv">${f$(tot)}</div><div class="ss">${esc(perL)}</div></div><div class="stat"><div class="sl">Regular</div><div class="sv">${f$(sR)}</div><div class="ss">5035-001</div></div><div class="stat"><div class="sl">Overtime</div><div class="sv ${sR && sO / sR > .15 ? "neg" : ""}">${f$(sO)}</div><div class="ss">${fP(sR ? sO / sR : null)} of regular</div></div><div class="stat"><div class="sl">Status</div><div class="sv" style="font-size:16px;padding-top:4px">${esc(info.status || "–")}</div><div class="ss">${esc(id === "_un" ? "" : id)}</div></div></div>
+    ${per.length > 1 ? `<div class="card" style="margin-bottom:18px"><div class="card-h"><h3>Overtime rate by month</h3></div><div id="ech"></div></div>` : ""}${linesTable(ls)}`);
+  if (per.length > 1) lineChart($("#ech"), {labels: per.map(x => MN[+x.slice(5) - 1]), fmt: v => fP(v, 0), height: 200, ref: {value: .08, label: "8%"}, series: [{name: "OT % of regular", short: "OT %", color: "var(--c1)", values: per.map((_, i) => reg[i] ? ot[i] / reg[i] : null)}]});
 }
 
 /* ------------------------------------------------ G3 MOVE */

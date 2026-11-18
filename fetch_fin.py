@@ -189,6 +189,24 @@ def build_live(cfg, tz):
         k = ("ARJ", g(r, "invoice.invoiceDate"), g(r, "glAccount.id"), g(r, "dimensions.location.id") or "", cust.lower(),
              round(abs(money(g(r, "baseAmount"))), 2))
         memo_ix[k].append((f"Invoice - {cust}: {g(r, 'memo') or ''}".rstrip(": "), g(r, "invoice.invoiceNumber") or ""))
+    # Sage summarizes a document's lines that share account + location into one GL line, so also index
+    # each document's per-account totals (memo = the distinct line memos joined).
+    grp = defaultdict(lambda: [0.0, [], ""])
+    for kind, rows, dn, dd, who in (("APJ", bills, "bill.billNumber", "bill.postingDate", "bill.vendor.name"),
+                                    ("ARJ", inv, "invoice.invoiceNumber", "invoice.invoiceDate", "invoice.customer.name")):
+        for r in rows:
+            gk = (kind, g(r, dd), g(r, "glAccount.id"), g(r, "dimensions.location.id") or "", (g(r, who) or "").lower(), g(r, dn) or "")
+            e = grp[gk]
+            e[0] += money(g(r, "baseAmount"))
+            m = (g(r, "memo") or "").strip()
+            if m and m not in e[1]:
+                e[1].append(m)
+            e[2] = g(r, who) or ""
+    for gk, (tot, ms, name) in grp.items():
+        k = gk[:5] + (round(abs(tot), 2),)
+        if k not in memo_ix:
+            lbl = "Bill" if gk[0] == "APJ" else "Invoice"
+            memo_ix[k].append((f"{lbl} - {name}: {'; '.join(ms)}".rstrip(": "), gk[5]))
     matched = 0
     for r in raw:
         memo, doc = g(r, "description") or "", ""
