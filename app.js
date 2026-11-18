@@ -728,6 +728,19 @@ function periodLine(ctx) { const [y, mo] = ctx.actM.split("-").map(Number), end 
 const fileStem = ctx => `GFS ${ctx.stmt} - ${ENTS_S[ctx.ent]} - ${ctx.mode === "month" ? ymLabel(ctx.actM, true) : ctx.mode === "ytd" ? "YTD " + ymLabel(ctx.actM, true) : "Trend " + ctx.actM.slice(0, 4)}`;
 function saveBlob(blob, name) { const a = document.createElement("a"); a.href = URL.createObjectURL(blob); a.download = name.replace(/[\\/:*?"<>|]/g, "-"); document.body.appendChild(a); a.click(); setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 1500); }
 
+/* ExcelJS writes <pageSetUpPr> before <outlinePr> inside <sheetPr>; Excel requires the reverse order and
+   rejects the sheet otherwise, so the sheet XML is put into schema order before saving. */
+const libZip = () => loadLib("The zip library", ["https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js", "https://cdn.jsdelivr.net/npm/jszip@3.10.1/dist/jszip.min.js"], () => window.JSZip);
+async function fixXlsx(buf) {
+  await libZip(); const zip = await JSZip.loadAsync(buf);
+  for (const f of Object.keys(zip.files).filter(n => /^xl\/worksheets\/sheet\d+\.xml$/.test(n))) {
+    let x = await zip.file(f).async("string");
+    x = x.replace(/<sheetPr>(.*?)<\/sheetPr>/, (m, inner) => { const tab = (inner.match(/<tabColor[^>]*\/>/) || [""])[0], out = (inner.match(/<outlinePr[^>]*\/>/) || [""])[0], pg = (inner.match(/<pageSetUpPr[^>]*\/>/) || [""])[0]; return `<sheetPr>${tab}${out}${pg}</sheetPr>`; })
+      .replace(/outlineLevelRow="0"/, `outlineLevelRow="${Math.max(0, ...[...x.matchAll(/outlineLevel="(\d)"/g)].map(m => +m[1]))}"`)
+      .replace(/<row ([^>]*?) collapsed="1"/g, "<row $1");
+    zip.file(f, x); }
+  return zip.generateAsync({type: "arraybuffer", compression: "DEFLATE"});
+}
 /* ---------- Excel: every group expanded with Excel outline buttons; subtotals and totals are formulas */
 async function exportExcel(ctx) {
   await libExcel();
@@ -735,7 +748,7 @@ async function exportExcel(ctx) {
   const land = ctx.mode === "trend" || cols.length > 6;
   const ws = wb.addWorksheet(ENTS_S[ctx.ent], {views: [{state: "frozen", ySplit: 7, showGridLines: false}],
     pageSetup: {orientation: land ? "landscape" : "portrait", fitToPage: true, fitToWidth: 1, fitToHeight: 0, margins: {left: .5, right: .5, top: .6, bottom: .6, header: .3, footer: .3}, printTitlesRow: "7:7"},
-    properties: {outlineProperties: {summaryBelow: true}}});
+    properties: {outlineLevelRow: 2}});
   ws.headerFooter.oddFooter = `&L&8GFS Logistics · ${ctx.stmt}&C&8Page &P of &N&R&8Prepared from Sage Intacct`;
   const F = "Arial", NF = '#,##0_);(#,##0);"–"_)', PF = '0.0%_);(0.0%);"–"_)', last = cols.length + 1, colL = n => ws.getColumn(n).letter;
   ws.getColumn(1).width = ctx.mode === "trend" ? 44 : 52; cols.forEach((c, i) => ws.getColumn(i + 2).width = c.mon ? 12 : c.vp || c.pr != null ? 10 : 15);
@@ -791,7 +804,8 @@ async function exportExcel(ctx) {
     if (r.kind === "tot" && r.cls) xr.eachCell({includeEmpty: true}, (cl, n) => { if (n <= last) cl.fill = {type: "pattern", pattern: "solid", fgColor: {argb: r.cls === "final" ? "FFDCE6F2" : "FFF1F5FA"}}; });
   }
   const nr = ws.getRow(R + 1).getCell(1); nr.value = `Prepared from the Sage Intacct general ledger on ${new Date().toLocaleDateString("en-US", {month: "long", day: "numeric", year: "numeric"})}. ${ctx.basis === "bud" && ctx.mode !== "trend" ? "Budgets are compared at the category level." : ""}`; nr.font = {name: F, size: 8, italic: true, color: {argb: "FF6B7A90"}};
-  const buf = await wb.xlsx.writeBuffer();
+  let buf = await wb.xlsx.writeBuffer();
+  buf = await fixXlsx(buf);
   saveBlob(new Blob([buf], {type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"}), fileStem(ctx) + ".xlsx");
 }
 
