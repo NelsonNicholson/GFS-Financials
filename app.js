@@ -401,8 +401,16 @@ async function drill(spec, ent, ms, label) {
 const vsWord = (d, basis) => `${d >= 0 ? "above" : "below"} ${basis === "bud" ? "budget" : basis === "py" ? "the prior year" : "the prior month"}`;
 function groupVariances(type, ent, ms, basis) {
   const bc = basisCols(basis, ms), A = computeCol(type, ent, ms, "a"), B = computeCol(type, ent, bc.ms, bc.f);
-  return layoutDef(type, ent).filter(i => i.k === "grp" && i.id !== "mv").map(g => ({g, a: A[g.id] || 0, b: B[g.id] || 0, imp: ((A[g.id] || 0) - (B[g.id] || 0)) * g.good}));
+  return layoutDef(type, ent).filter(i => i.k === "grp" && i.id !== "mv").map(g => { const a = A[g.id] || 0, bf = B[g.id] || 0, gt = basis === "bud" && g.id === "rv_ot" ? growthTarget(ms, ent) : 0, b = bf - gt;
+    return {g, a, b, bf, gt, imp: (a - b) * g.good, impF: (a - bf) * g.good}; });
 }
+/* The revenue budget carries the "Unidentified & Pure Spec Growth" (G1) and "Unidentified Growth Target" (G2) customer
+   budget lines in Other Revenue (4025). Comparing them to Other Revenue actuals is misleading, so they are shown on their own. */
+function growthTarget(ms, ent) {
+  const rows = (M.cfg.salesBudget || []).filter(b => b.growth && (ent === "ALL" || b.div === ent)), fy = String(M.cfg.fyStart || "2026").slice(0, 4);
+  return ms.filter(m => m.startsWith(fy)).reduce((t, m) => t + rows.reduce((s, b) => s + (b.bud[+m.slice(5) - 1] || 0), 0), 0);
+}
+const growthByDiv = ms => ["G1", "G2"].map(d => [d, growthTarget(ms, d)]).filter(([, v]) => Math.abs(v) > .5);
 
 /* ============================================================ views */
 const views = {};
@@ -436,7 +444,7 @@ views.summary = el => {
   const mg = (id, V) => V.rev ? V[id] / V.rev : null;
 
   const gv = groupVariances(T, "ALL", [m], basis);
-  const revG = gv.filter(x => x.g.good === 1 && x.g.id.startsWith("rv_")), revImp = revG.reduce((s, x) => s + x.imp, 0);
+  const revG = gv.filter(x => x.g.good === 1 && x.g.id.startsWith("rv_")), revImp = revG.reduce((s, x) => s + x.impF, 0), gT = revG.reduce((s, x) => s + x.gt, 0);
   const gvC = [{g: {label: "Revenue", id: "rev"}, imp: revImp}, ...gv.filter(x => !revG.includes(x))];
   const neg = gvC.filter(x => x.imp < -500).sort((a, b) => a.imp - b.imp).slice(0, 2), posv = gvC.filter(x => x.imp > 500).sort((a, b) => b.imp - a.imp).slice(0, 2);
   const dRev = A.rev - B.rev, dUni = A.uni - B.uni, up = d => d >= 0 ? "up" : "dn";
@@ -444,6 +452,7 @@ views.summary = el => {
   const p1 = `Warehouse operating income was <b>${fK(A.woi)}</b>, a <b>${fP(mg("woi", A))}</b> margin (${fPts((mg("woi", A) || 0) - (mg("woi", B) || 0))} vs ${bName}). ` +
     (neg.length ? `The largest drags were ${neg.map(x => `<b>${esc(x.g.label.toLowerCase())}</b> (${fK(x.imp, true)})`).join(" and ")}` : "No category fell materially short") +
     (posv.length ? `, offset in part by ${posv.map(x => `<b>${esc(x.g.label.toLowerCase())}</b> (${fK(x.imp, true)})`).join(" and ")}.` : ".");
+  const pG = gT > .5 ? ` The ${bName} includes <b>${fK(gT)}</b> of unidentified growth target (${growthByDiv([m]).map(([d, v]) => `${d} ${fK(v)}`).join(", ")}) that is not tied to a customer; excluding it, revenue ${revImp + gT >= 0 ? "beat" : "missed"} ${bName} by <b>${fK(Math.abs(revImp + gT))}</b>.` : "";
   const p2 = `Year to date, revenue is <b>${fK(YA.rev)}</b> (${fP(pctOf(YA.rev, YB.rev), 1, true)} vs ${bName}) and unadjusted net income is <b>${fK(YA.uni)}</b> against <b>${fK(YB.uni)}</b>` +
     (Math.abs(A.mv || 0) > .5 ? `. The G3 move added <b>${fK(A.mv)}</b> of operating expense this month, leaving net income after move costs at <b>${fK(A.nim)}</b>.` : ".");
   const tile = (id, label, good, sub) => {
@@ -456,7 +465,7 @@ views.summary = el => {
       <div class="chipbox"><div class="cl">${l2}</div><div class="cv ${cls(tone(d2, good))}">${fK(d2, true)}</div></div></div>
       <div class="k-spark">${sparkBars(sv, sb, 11)}</div></div>`; };
   el.innerHTML = `
-    <div class="row"><div class="card brief"><h2>${head}</h2><p>${p1}</p><p>${p2}</p></div></div>
+    <div class="row"><div class="card brief"><h2>${head}</h2><p>${p1}${pG}</p><p>${p2}</p></div></div>
     <div class="row g4">
       ${tile("rev", "Revenue", 1, `YTD ${fK(YA.rev)} · ${fP(pctOf(YA.rev, YB.rev), 1, true)} vs ${bShort}`)}
       ${tile("woi", "Warehouse Operating Income", 1, `${fP(mg("woi", A))} margin · ${fPts((mg("woi", A) || 0) - (mg("woi", B) || 0))} vs ${bShort}`)}
@@ -502,7 +511,7 @@ views.summary = el => {
   const costImp = imp.reduce((s, x) => s + x.imp, 0), worst = imp.filter(x => x.imp < 0).sort((a, b) => a.imp - b.imp)[0];
   $("#wfLede", el).innerHTML = `${ymLabel(m, true)} · revenue ${revImp >= 0 ? "beat" : "missed"} ${bName} by <b>${fK(Math.abs(revImp))}</b>; costs ${costImp >= 0 ? "came in under" : "ran over"} by <b>${fK(Math.abs(costImp))}</b>${worst ? `, led by ${esc(worst.g.label.toLowerCase())} (${fK(worst.imp, true)})` : ""}. Click a bar for the detail.`;
   waterfall($("#wf", el), [{label: BASIS[basis], v: B.uni, type: "start"},
-    {label: "Revenue", v: revImp, type: "delta", note: `Total revenue: ${f$(A.rev)} actual vs ${f$(B.rev)} ${bName}. ${revG.filter(x => Math.abs(x.imp) >= 500).sort((a, b) => Math.abs(b.imp) - Math.abs(a.imp)).map(x => `${x.g.label} ${fK(x.imp, true)}`).join(" · ")}`, onClick: () => go("pl", () => Object.assign(st.pl, {layout: "soo", ent: "ALL", mode: "month", actM: m, basis}))},
+    {label: "Revenue", v: revImp, type: "delta", note: `Total revenue: ${f$(A.rev)} actual vs ${f$(B.rev)} ${bName}${gT ? `, which includes ${f$(gT)} of unidentified growth target held in Other Revenue (identified revenue ${fK(revImp + gT, true)} vs its budget)` : ""}. ${revG.filter(x => Math.abs(x.imp) >= 500).sort((a, b) => Math.abs(b.imp) - Math.abs(a.imp)).map(x => `${x.g.label} ${fK(x.imp, true)}`).join(" · ")}`, onClick: () => go("pl", () => Object.assign(st.pl, {layout: "soo", ent: "ALL", mode: "month", actM: m, basis}))},
     ...topI.map(x => ({label: short(x.g.label), v: x.imp, type: "delta", note: `${x.g.label}: ${f$(x.a)} actual vs ${f$(x.b)} ${bName}`, onClick: () => drill(grpSpec(x.g), "ALL", [m], x.g.label)})),
     ...(Math.abs(rest) >= 1 ? [{label: "Other", v: rest, type: "delta"}] : []), {label: "Actual", v: A.uni, type: "end"}], {height: 296});
 
@@ -521,7 +530,9 @@ views.summary = el => {
     const acc = x.g.rows.map(r => ({r, v: r.t === "acct" ? accVal(r.a, "ALL", [m], "a") : virtVal(r.k, [m], "a"), p: r.t === "acct" ? accVal(r.a, "ALL", [pm], "a") : virtVal(r.k, [pm], "a")})).sort((p, q) => Math.abs(q.v - q.p) - Math.abs(p.v - p.p))[0];
     const a1 = acc && Math.abs(acc.v - acc.p) > 300 ? `${acc.r.label.replace(/^\d{4}(-\d{3})? · /, "")} ${fK(acc.v - acc.p, true)} vs ${ymLabel(pm)}` : "";
     return [a1, dv.length ? `driven by ${dv.map(d => `${d.k} (${fK(d.d, true)})`).join(", ")}` : ""].filter(Boolean).join("; "); };
-  $("#ins", el).innerHTML = ilist.map((x, i) => `<li class="click" data-i="${i}"><span class="ic ${x.good ? "good" : "bad"}">${x.good ? "▲" : "▼"}</span><div><div class="t">${esc(x.g.label)}</div><div class="w">${fK(x.a)} vs ${fK(x.b)} ${bName}${why(x) ? " · " + esc(why(x)) : ""}</div></div><div class="v ${x.good ? "pos" : "neg"}">${fK(x.imp, true)}</div></li>`).join("") || `<li><div></div><div class="w">No material variances.</div><div></div></li>`;
+  const gItem = gT > .5 ? `<li class="click" id="gtItem"><span class="ic gold">◆</span><div><div class="t">Unidentified growth target</div><div class="w">${fK(gT)} of the ${ymLabel(m)} revenue ${bName} is growth not yet tied to a customer (${growthByDiv([m]).map(([d, v]) => `${d} ${fK(v)}`).join(" · ")}), budgeted in Other Revenue. Other Revenue is compared without it.</div></div><div class="v muted">${fK(gT)}</div></li>` : "";
+  $("#ins", el).innerHTML = gItem + ilist.map((x, i) => `<li class="click" data-i="${i}"><span class="ic ${x.good ? "good" : "bad"}">${x.good ? "▲" : "▼"}</span><div><div class="t">${esc(x.g.label)}</div><div class="w">${fK(x.a)} vs ${fK(x.b)} ${bName}${x.gt ? ` (excl. ${fK(x.gt)} growth target)` : ""}${why(x) ? " · " + esc(why(x)) : ""}</div></div><div class="v ${x.good ? "pos" : "neg"}">${fK(x.imp, true)}</div></li>`).join("") || `<li><div></div><div class="w">No material variances.</div><div></div></li>`;
+  const gti = $("#gtItem", el); if (gti) gti.addEventListener("click", () => go("sales"));
   $$("#ins li[data-i]", el).forEach(li => li.addEventListener("click", () => { const x = ilist[+li.dataset.i]; drill(grpSpec(x.g), "ALL", [m], x.g.label); }));
 
   const divs = ["G1", "G2", "CW"].filter(e => Math.abs(val("rev", "std", e, [m], "a")) > .5 || Math.abs(val("rev", "std", e, [m], "b")) > .5);
@@ -617,7 +628,8 @@ views.pl = el => {
   const data = cols.map(c => c.ms ? computeCol(T, ent, c.ms, c.f) : null);
   const isZero = id => data.every(d => !d || Math.abs(d[id] || 0) < .5);
   const budC = c => c.f === "b" || (c.cmp && p.basis === "bud"), isZeroD = id => data.every((d, i) => !d || budC(cols[i]) || Math.abs(d[id] || 0) < .5);
-  const rows = stmtRows(L, isZero, p.zeros, p.mode === "trend", isZeroD);
+  const gtOn = p.basis === "bud" && p.mode !== "trend" && growthTarget(bc.ms, ent) > .5;
+  const rows = stmtRows(L, isZero, p.zeros, p.mode === "trend", isZeroD, gtOn ? {rv_ot: "Incl. unidentified growth target (budget only)"} : {});
   const ctx = {T, ent, stmt, sub, cols, data, rows, mode: p.mode, actM: p.actM, basis: p.basis, open: p.open};
   const box = $("#fsw", el);
   const lblW = p.mode === "trend" ? 230 : 0, wt = c => c.mon || p.mode !== "trend" ? 1 : 1.45, unitW = (box.clientWidth - (lblW || box.clientWidth * .34)) / cols.reduce((s, c) => s + wt(c), 0);
@@ -646,6 +658,7 @@ views.pl = el => {
     else if (r.kind === "acct" || r.kind === "subt" || r.kind === "gtot") h += `<tr class="ch ${r.kind} ${r.depth === 2 ? "d2" : ""} ${open ? "" : "hide"}" data-p="${r.parent}" data-ri="${ri}"><td title="${esc(r.label)}">${esc(r.label)}</td>${cols.map((c, i) => cellH(c, i, r)).join("")}</tr>`;
     else if (r.kind === "tot") h += `<tr class="tot ${r.cls}" data-ri="${ri}"><td>${esc(r.label)}</td>${cols.map((c, i) => cellH(c, i, r)).join("")}</tr>`;
     else if (r.kind === "pct") h += `<tr class="pct"><td>${esc(r.label)}</td>${cols.map((c, i) => cellH(c, i, r)).join("")}</tr>`;
+    else if (r.kind === "note") h += `<tr class="note"><td title="The revenue budget holds the unidentified / spec growth target in Other Revenue; it isn't tied to a customer.">${esc(r.label)}</td>${cols.map((c, i) => cellH(c, i, r)).join("")}</tr>`;
   });
   box.innerHTML = `<table class="fs ${p.mode === "trend" ? "trend" : ""}">${h}</tbody></table>`;
   const fs = $("table", box);
@@ -670,7 +683,7 @@ views.pl = el => {
 
 /* ---------- statement model shared by the screen, Excel and PDF */
 const fNk = v => { if (v == null || !isFinite(v) || Math.abs(v) < 50) return "–"; const s = Math.abs(v / 1000).toLocaleString("en-US", {minimumFractionDigits: 1, maximumFractionDigits: 1}); return v < 0 ? `(${s})` : s; };
-function stmtRows(L, isZero, zeros, withPct, isZeroD = isZero) {
+function stmtRows(L, isZero, zeros, withPct, isZeroD = isZero, notes = {}) {
   const out = [], vis = r => zeros || !(r.t === "acct" ? isZeroD(r.id) : isZero(r.id));
   for (const it of L) {
     if (it.k === "sec") out.push({kind: "sec", label: it.label});
@@ -686,6 +699,7 @@ function stmtRows(L, isZero, zeros, withPct, isZeroD = isZero) {
         it.rows.filter(r => !r.sg && vis(r)).forEach(r => out.push(ar(r, 1)));
       } else it.rows.filter(vis).forEach(r => out.push(ar(r, 1)));
       out.push({kind: "gtot", id: g, label: `Total ${it.label}`, parent: g, good, it});
+      if (notes[g]) out.push({kind: "note", id: g + ":note", label: notes[g], good});
     } else if (it.k === "tot") out.push({kind: "tot", id: it.id, label: it.label, good: it.good, cls: it.cls || "", parts: it.parts});
     else if (it.k === "pct" && withPct) out.push({kind: "pct", label: it.label, num: it.num, den: it.den});
   }
@@ -696,6 +710,7 @@ const rowSpec = r => r.kind === "grp" || r.kind === "gtot" ? grpSpec(r.it) : r.k
 function stmtCell(ctx, c, i, row) {
   const {cols, data, basis} = ctx, id = row.id;
   if (row.kind === "sec" || row.kind === "subh") return {blank: true};
+  if (row.kind === "note") return c.ms && (c.f === "b" || (c.cmp && basis === "bud")) ? {k: "amt", v: growthTarget(c.ms, ctx.ent), click: false} : {blank: true};
   if (row.kind === "pct") {
     if (c.ms) return {k: "pct", v: data[i][row.den] ? data[i][row.num] / data[i][row.den] : null};
     if (c.v) { const a = data[c.v[0]], b = data[c.v[1]]; return {k: "pts", v: (a[row.den] ? a[row.num] / a[row.den] : 0) - (b[row.den] ? b[row.num] / b[row.den] : 0)}; }
@@ -779,6 +794,8 @@ async function exportExcel(ctx) {
   for (const [Rr, r] of pending) {
     if (r.kind === "sec" || r.kind === "subh" || r.kind === "grp") continue;
     const xr = ws.getRow(Rr);
+    if (r.kind === "note") { xr.getCell(1).font = {name: F, size: 8.5, italic: true, color: {argb: "FF6B7A90"}}; xr.getCell(1).alignment = {indent: 2};
+      cols.forEach((c, i) => { const cv = stmtCell(ctx, c, i, r); if (cv.k === "amt") { const cl = xr.getCell(i + 2); cl.value = r2(cv.v); cl.numFmt = NF; cl.font = {name: F, size: 8.5, italic: true, color: {argb: "FF6B7A90"}}; } }); continue; }
     cols.forEach((c, i) => {
       const cell = xr.getCell(i + 2), L1 = colL(i + 2); cell.font = {name: F, size: 9, bold: r.kind === "tot" || r.kind === "gtot"};
       if (r.kind === "pct") { if (c.ms) { const n = partRef(r.num, i), d = partRef(r.den, i); cell.value = {formula: `IF(${d}=0,"",${n}/${d})`}; cell.numFmt = PF; cell.font = {name: F, size: 8.5, italic: true}; } return; }
@@ -812,7 +829,7 @@ async function exportExcel(ctx) {
 /* ---------- PDF: auditor-style statement; one portrait page when it fits, otherwise landscape without splitting a group */
 async function exportPdf(ctx) {
   await libPdf();
-  const {cols} = ctx, rows = ctx.rows.filter(r => r.kind === "sec" || r.kind === "grp" || r.kind === "tot" || r.kind === "pct" || ctx.open.has(r.parent));
+  const {cols} = ctx, rows = ctx.rows.filter(r => r.kind === "sec" || r.kind === "grp" || r.kind === "tot" || r.kind === "pct" || r.kind === "note" || ctx.open.has(r.parent));
   const shown = rows.map(r => r.kind === "grp" && ctx.open.has(r.id) ? {...r, open: true} : r);
   const {jsPDF} = window.jspdf, lg = await logoData().catch(() => null);
   const W0 = 612, H0 = 792, mg = 40, headH = 108, footH = 30;
@@ -856,8 +873,8 @@ async function exportPdf(ctx) {
       const yy = y + (r.kind === "sec" ? rh * .5 : 0);
       doc.setTextColor(...ink);
       if (r.kind === "sec") { doc.setFont("times", "bold"); doc.setFontSize(fs * .92); doc.setTextColor(...mute); doc.text(r.label.toUpperCase(), x0, yy); y += unit(r) * rh; return; }
-      const ind = r.kind === "acct" ? (r.depth === 2 ? 22 : 12) : r.kind === "subh" || r.kind === "subt" ? 12 : 0;
-      const bold = r.kind === "tot" || r.kind === "gtot" || (r.kind === "grp" && r.open), ital = r.kind === "pct" || r.kind === "subh";
+      const ind = r.kind === "acct" ? (r.depth === 2 ? 22 : 12) : r.kind === "subh" || r.kind === "subt" || r.kind === "note" ? 12 : 0;
+      const bold = r.kind === "tot" || r.kind === "gtot" || (r.kind === "grp" && r.open), ital = r.kind === "pct" || r.kind === "subh" || r.kind === "note";
       doc.setFont("times", bold ? "bold" : ital ? "italic" : "normal"); doc.setFontSize(r.kind === "acct" ? fs * .95 : fs);
       const lab = doc.splitTextToSize(r.label, labW - ind - 6)[0]; doc.text(lab, x0 + ind, yy);
       if (!(r.kind === "grp" && r.open) && r.kind !== "subh") cols.forEach((c, i) => {

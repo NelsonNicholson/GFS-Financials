@@ -389,3 +389,6 @@ iframe.ar{width:100%;height:calc(100vh - 150px);border:1px solid var(--line);bor
 .stmt .fs thead th{top:70px}
 #cfsw .fs thead th{top:0}
 #cfsw .fs tr.acct td,#cfsw .fs tr.acct td:first-child{background:var(--surface-2)}
+.ilist .ic.gold{background:var(--gold-soft);color:var(--gold)}
+.fs tr.note td{font-size:11.5px;font-style:italic;color:var(--muted);height:calc(var(--rh,28px) - 4px)}
+.fs tr.note td:first-child{padding-left:36px}
