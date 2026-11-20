@@ -311,6 +311,20 @@ def build_live(cfg, tz):
         k = (g(r, "invoice.invoiceDate"), g(r, "invoice.invoiceNumber") or "", g(r, "invoice.customer.name") or g(r, "invoice.customer.id"),
              g(r, "dimensions.location.id") or "", "i")
         sagg[k] += money(g(r, "baseAmount"))
+    # January 2026 was invoiced before the Sage go-live and loaded as conversion invoices whose lines post to
+    # Accounts Receivable (1000-201) instead of revenue accounts; count those as that month's sales.
+    conv = cfg.get("salesConversion") or {"account": "1000-201", "from": "2026-01-01", "to": "2026-01-31"}
+    if conv and conv.get("account"):
+        cinv = s.query("accounts-receivable/invoice-line",
+                       ["invoice.invoiceDate", "invoice.invoiceNumber", "invoice.customer.id", "invoice.customer.name",
+                        "dimensions.location.id", "glAccount.id", "baseAmount"],
+                       [{"$between": {"invoice.invoiceDate": [conv["from"], conv["to"]]}}, {"$eq": {"glAccount.id": conv["account"]}}],
+                       required=False) or []
+        for r in cinv:
+            k = (g(r, "invoice.invoiceDate"), g(r, "invoice.invoiceNumber") or "", g(r, "invoice.customer.name") or g(r, "invoice.customer.id"),
+                 g(r, "dimensions.location.id") or "", "i")
+            sagg[k] += money(g(r, "baseAmount"))
+        print(f"[sales] {len(cinv)} conversion invoice lines added ({conv['from']} to {conv['to']})")
     adj = s.query("accounts-receivable/adjustment-line",
                   ["arAdjustment.createdDate", "arAdjustment.adjustmentNumber", "arAdjustment.customer.name",
                    "dimensions.location.id", "glAccount.id", "baseCurrency.amount"],

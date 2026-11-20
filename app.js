@@ -754,6 +754,9 @@ async function fixXlsx(buf) {
       .replace(/outlineLevelRow="0"/, `outlineLevelRow="${Math.max(0, ...[...x.matchAll(/outlineLevel="(\d)"/g)].map(m => +m[1]))}"`)
       .replace(/<row ([^>]*?) collapsed="1"/g, "<row $1");
     zip.file(f, x); }
+  // ExcelJS writes editAs on <oneCellAnchor>, which only <twoCellAnchor> allows; Excel "repairs" (drops) the logo otherwise.
+  for (const f of Object.keys(zip.files).filter(n => /^xl\/drawings\/drawing\d+\.xml$/.test(n))) {
+    const x = await zip.file(f).async("string"); zip.file(f, x.replace(/<xdr:oneCellAnchor editAs="[^"]*">/g, "<xdr:oneCellAnchor>")); }
   return zip.generateAsync({type: "arraybuffer", compression: "DEFLATE"});
 }
 /* ---------- Excel: every group expanded with Excel outline buttons; subtotals and totals are formulas */
@@ -823,7 +826,8 @@ function addStmtSheet(wb, ctx, sheetName, logo) {
       else if (c.vp) { const a = `${colL(c.vp[0] + 2)}${Rr}`, b = `${colL(c.vp[1] + 2)}${Rr}`; cell.value = {formula: `IF(${b}=0,"",(${a}-${b})/ABS(${b}))`}; cell.numFmt = PF; }
       else if (c.pr != null && revRow()) { const a = `${colL(c.pr + 2)}${Rr}`, rv = `$${colL(c.pr + 2)}$${revRow()}`; cell.value = {formula: `IF(${rv}=0,"",${a}/${rv})`}; cell.numFmt = PF; }
       cell.alignment = {horizontal: "right"};
-      if (r.kind === "subt" || r.kind === "gtot" || r.kind === "tot") cell.border = {top: {style: "thin"}};
+      if (r.kind === "subt" || r.kind === "tot") cell.border = {top: {style: "thin"}};
+      if (r.kind === "gtot" && Rr - 1 > HR) { const pc = ws.getRow(Rr - 1).getCell(i + 2); pc.border = {...(pc.border || {}), bottom: {style: "thin"}}; }
       if (r.kind === "tot" && r.cls === "final") cell.border = {top: {style: "thin"}, bottom: {style: "double"}};
     });
     if (r.kind === "tot" && r.cls) xr.eachCell({includeEmpty: true}, (cl, n) => { if (n <= last) cl.fill = {type: "pattern", pattern: "solid", fgColor: {argb: r.cls === "final" ? "FFDCE6F2" : "FFF1F5FA"}}; });
@@ -890,9 +894,9 @@ function addArSheet(wb, ar, logo) {
     const o = by.get(it.c) || {name: info.n || it.c, div: info.div || "Unassigned", lp: info.lp || "", b: [0, 0, 0, 0, 0], n: 0}; o.b[b] += it.bal; o.n++; by.set(it.c, o); }
   const divs = [...new Set([...by.values()].map(o => o.div))].sort((a, b) => (a === "Unassigned") - (b === "Unassigned") || a.localeCompare(b));
   const long = new Date(ar.asOf + "T12:00:00").toLocaleDateString("en-US", {month: "long", day: "numeric", year: "numeric"});
-  const ws = xlSheet(wb, "AR Aging", 9, ["Accounts Receivable Aging", `Aged by due date as of ${long}`, "Open invoices, credit memos and unapplied cash from Sage AR", "(Unaudited)"], logo, {portrait: false});
-  ws.getColumn(1).width = 42; for (let k = 2; k <= 7; k++) ws.getColumn(k).width = 14; ws.getColumn(8).width = 9; ws.getColumn(9).width = 14;
-  xlHeader(ws, ["Customer", "Current", "1–30 days", "31–60 days", "61–90 days", "Over 90 days", "Total", "% of total", "Last payment"]);
+  const ws = xlSheet(wb, "AR Aging", 10, ["Accounts Receivable Aging", `Aged by due date as of ${long}`, "Open invoices, credit memos and unapplied cash from Sage AR", "(Unaudited)"], logo, {portrait: false});
+  ws.getColumn(1).width = 42; for (let k = 2; k <= 7; k++) ws.getColumn(k).width = 14; ws.getColumn(8).width = 9; ws.getColumn(9).width = 13; ws.getColumn(10).width = 13;
+  xlHeader(ws, ["Customer", "Current", "1–30 days", "31–60 days", "61–90 days", "Over 90 days", "Total", "% of total", "Last payment", "Last payment amount"]);
   let R = 8; const subs = []; let grandRow;
   const fill = (r, vals, bold, rule) => { const xr = ws.getRow(r); vals.forEach((v, i) => { const c = xr.getCell(i + 2); c.value = v; c.numFmt = XNF; c.font = {name: XF, size: 9, bold}; if (rule) c.border = {top: {style: "thin"}}; });
     const t = xr.getCell(7); t.value = {formula: `SUM(B${r}:F${r})`}; t.numFmt = XNF; t.font = {name: XF, size: 9, bold: true}; if (rule) t.border = {top: {style: "thin"}}; return xr; };
@@ -902,13 +906,15 @@ function addArSheet(wb, ar, logo) {
     const h = ws.getRow(R).getCell(1); h.value = (ENTS[d] || d).toUpperCase(); h.font = {name: XF, size: 8.5, bold: true, color: {argb: "FF5B6B80"}}; R++;
     const r0 = R;
     for (const o of cs) { const xr = fill(R, o.b.map(r2)); const c = xr.getCell(1); c.value = o.name; c.font = {name: XF, size: 9}; c.alignment = {indent: 1};
-      const lp = xr.getCell(9); lp.value = o.lp ? new Date(o.lp + "T12:00:00") : ""; lp.numFmt = "m/d/yyyy"; lp.font = {name: XF, size: 9}; lp.alignment = {horizontal: "right"}; pctRows.push(R); R++; }
+      const lpv = Array.isArray(o.lp) ? o.lp : [o.lp, null], ld = String(lpv[0] || "").slice(0, 10), dObj = /^\d{4}-\d{2}-\d{2}$/.test(ld) ? new Date(ld + "T12:00:00") : null;
+      const lp = xr.getCell(9); if (dObj && !isNaN(dObj)) { lp.value = dObj; lp.numFmt = "m/d/yyyy"; } lp.font = {name: XF, size: 9}; lp.alignment = {horizontal: "right"};
+      const la = xr.getCell(10); if (lpv[1] != null && isFinite(+lpv[1])) { la.value = r2(+lpv[1]); la.numFmt = XNF; } la.font = {name: XF, size: 9}; pctRows.push(R); R++; }
     const xr = fill(R, [0, 1, 2, 3, 4].map(i => ({formula: `SUM(${"BCDEF"[i]}${r0}:${"BCDEF"[i]}${R - 1})`})), true, true);
     xr.getCell(1).value = `Total ${d}`; xr.getCell(1).font = {name: XF, size: 9, bold: true}; subs.push(R); pctRows.push(R); R += 2;
   }
   grandRow = R; const g = fill(R, [0, 1, 2, 3, 4].map(i => ({formula: subs.map(q => `${"BCDEF"[i]}${q}`).join("+") || "0"})), true, true);
   g.getCell(1).value = "Total accounts receivable"; g.getCell(1).font = {name: XF, size: 10, bold: true};
-  for (let k = 1; k <= 9; k++) { const c = g.getCell(k); c.fill = {type: "pattern", pattern: "solid", fgColor: {argb: "FFDCE6F2"}}; c.border = {top: {style: "thin"}, bottom: {style: "double"}}; }
+  for (let k = 1; k <= 10; k++) { const c = g.getCell(k); c.fill = {type: "pattern", pattern: "solid", fgColor: {argb: "FFDCE6F2"}}; c.border = {top: {style: "thin"}, bottom: {style: "double"}}; }
   const pr = ws.getRow(R + 1); pr.getCell(1).value = "% of total"; pr.getCell(1).font = {name: XF, size: 8.5, italic: true};
   for (let k = 2; k <= 7; k++) { const L = "BCDEFG"[k - 2], c = pr.getCell(k); c.value = {formula: `IF($G$${grandRow}=0,"",${L}${grandRow}/$G$${grandRow})`}; c.numFmt = XPF; c.font = {name: XF, size: 8.5, italic: true}; }
   for (const q of [...pctRows, grandRow]) { const c = ws.getRow(q).getCell(8); c.value = {formula: `IF($G$${grandRow}=0,"",G${q}/$G$${grandRow})`}; c.numFmt = XPF; c.font = {name: XF, size: 9}; }
