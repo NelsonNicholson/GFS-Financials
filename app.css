@@ -392,3 +392,9 @@ iframe.ar{width:100%;height:calc(100vh - 150px);border:1px solid var(--line);bor
 .ilist .ic.gold{background:var(--gold-soft);color:var(--gold)}
 .fs tr.note td{font-size:11.5px;font-style:italic;color:var(--muted);height:calc(var(--rh,28px) - 4px)}
 .fs tr.note td:first-child{padding-left:36px}
+.side-export{display:flex;align-items:center;gap:8px;width:100%;margin-bottom:12px;padding:10px 12px;border-radius:10px;border:1px solid rgba(226,194,122,.45);background:rgba(226,194,122,.12);color:#f3e3bd;font-weight:600;font-size:13px;cursor:pointer}
+.side-export:hover{background:rgba(226,194,122,.22)}
+.side-export svg{width:16px;height:16px;fill:none;stroke:currentColor;stroke-width:1.8;stroke-linecap:round;stroke-linejoin:round;flex:0 0 16px}
+.pk-list{display:grid;gap:9px}.pk{display:flex;align-items:center;gap:10px;font-size:13.5px;color:var(--ink);cursor:pointer}.pk input{width:16px;height:16px}
+.side-export{justify-content:flex-start;text-align:left;font-size:12.5px;padding:9px 12px;white-space:nowrap}
+#pkM{max-width:260px}

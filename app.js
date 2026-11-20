@@ -759,15 +759,23 @@ async function fixXlsx(buf) {
 /* ---------- Excel: every group expanded with Excel outline buttons; subtotals and totals are formulas */
 async function exportExcel(ctx) {
   await libExcel();
-  const {cols, rows, data} = ctx, wb = new ExcelJS.Workbook(); wb.creator = "GFS Financials Dashboard";
+  const wb = new ExcelJS.Workbook(); wb.creator = "GFS Financials Dashboard";
+  const logoId = await xlLogo(wb);
+  addStmtSheet(wb, ctx, ENTS_S[ctx.ent], logoId);
+  await saveWb(wb, fileStem(ctx) + ".xlsx");
+}
+async function xlLogo(wb) { try { const lg = await logoData(); return {id: wb.addImage({base64: lg.url, extension: "png"}), ratio: lg.h / lg.w}; } catch { return null; } }
+async function saveWb(wb, name) { let buf = await wb.xlsx.writeBuffer(); buf = await fixXlsx(buf); saveBlob(new Blob([buf], {type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"}), name); }
+function addStmtSheet(wb, ctx, sheetName, logo) {
+  const {cols, rows} = ctx;
   const land = ctx.mode === "trend" || cols.length > 6;
-  const ws = wb.addWorksheet(ENTS_S[ctx.ent], {views: [{state: "frozen", ySplit: 7, showGridLines: false}],
+  const ws = wb.addWorksheet(sheetName, {views: [{state: "frozen", ySplit: 7, showGridLines: false}],
     pageSetup: {orientation: land ? "landscape" : "portrait", fitToPage: true, fitToWidth: 1, fitToHeight: 0, margins: {left: .5, right: .5, top: .6, bottom: .6, header: .3, footer: .3}, printTitlesRow: "7:7"},
     properties: {outlineLevelRow: 2}});
   ws.headerFooter.oddFooter = `&L&8GFS Logistics · ${ctx.stmt}&C&8Page &P of &N&R&8Prepared from Sage Intacct`;
   const F = "Arial", NF = '#,##0_);(#,##0);"–"_)', PF = '0.0%_);(0.0%);"–"_)', last = cols.length + 1, colL = n => ws.getColumn(n).letter;
   ws.getColumn(1).width = ctx.mode === "trend" ? 44 : 52; cols.forEach((c, i) => ws.getColumn(i + 2).width = c.mon ? 12 : c.vp || c.pr != null ? 10 : 15);
-  try { const lg = await logoData(); const id = wb.addImage({base64: lg.url, extension: "png"}); ws.addImage(id, {tl: {col: 0, row: 0}, ext: {width: 150, height: 150 * lg.h / lg.w}}); } catch {}
+  if (logo) ws.addImage(logo.id, {tl: {col: 0, row: 0}, ext: {width: 150, height: 150 * logo.ratio}});
   const title = (r, text, sz, bold, italic) => { ws.mergeCells(r, 1, r, last); const c = ws.getCell(r, 1); c.value = text; c.font = {name: F, size: sz, bold, italic, color: {argb: "FF0B1F3A"}}; c.alignment = {horizontal: "center"}; };
   title(1, "GFS Logistics", 14, true); title(2, ctx.stmt, 12, true); title(3, ENTS[ctx.ent], 10); title(4, periodLine(ctx), 10, false, true);
   title(5, "(Unaudited)", 8, false, true); ws.getRow(1).height = 22;
@@ -821,11 +829,123 @@ async function exportExcel(ctx) {
     if (r.kind === "tot" && r.cls) xr.eachCell({includeEmpty: true}, (cl, n) => { if (n <= last) cl.fill = {type: "pattern", pattern: "solid", fgColor: {argb: r.cls === "final" ? "FFDCE6F2" : "FFF1F5FA"}}; });
   }
   const nr = ws.getRow(R + 1).getCell(1); nr.value = `Prepared from the Sage Intacct general ledger on ${new Date().toLocaleDateString("en-US", {month: "long", day: "numeric", year: "numeric"})}. ${ctx.basis === "bud" && ctx.mode !== "trend" ? "Budgets are compared at the category level." : ""}`; nr.font = {name: F, size: 8, italic: true, color: {argb: "FF6B7A90"}};
-  let buf = await wb.xlsx.writeBuffer();
-  buf = await fixXlsx(buf);
-  saveBlob(new Blob([buf], {type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"}), fileStem(ctx) + ".xlsx");
+  return ws;
 }
 
+/* ---------- Financials package: one Excel workbook with the monthly package tabs */
+const SALES_SECS = [["core", "Budgeted customers"], ["spec", "Identified spec & growth customers"], ["new", "New / unbudgeted customers"], ["growth", "Unidentified growth target"]];
+function trendCtx(T, ent, actM) {
+  const yy = actM.slice(0, 4), yt = monthsThrough(actM), L = layoutDef(T, ent);
+  const cols = yt.map(x => ({h: MN[+x.slice(5) - 1], ms: [x], f: "a", mon: true})).concat([{h: "YTD Actual", ms: yt, f: "a", ytd: true},
+    ...(hasBudget(yy) ? [{h: "YTD Budget", ms: yt, f: "b"}, {h: "Variance", v: [yt.length, yt.length + 1]}] : [])]);
+  const data = cols.map(c => c.ms ? computeCol(T, ent, c.ms, c.f) : null);
+  const isZero = id => data.every(d => !d || Math.abs(d[id] || 0) < .5), isZeroD = id => data.every((d, i) => !d || cols[i].f === "b" || Math.abs(d[id] || 0) < .5);
+  return {T, ent, stmt: T === "soo" ? "Statement of Operations" : "Income Statement", cols, data, rows: stmtRows(L, isZero, false, true, isZeroD, {}), mode: "trend", actM, basis: "bud", open: new Set()};
+}
+const XF = "Arial", XNF = '#,##0_);(#,##0);"–"_)', XPF = '0.0%_);(0.0%);"–"_)', XINK = "FF0B1F3A", XMUTE = "FF6B7A90";
+function xlSheet(wb, name, nCols, titles, logo, opt = {}) {
+  const ws = wb.addWorksheet(name, {views: [{state: "frozen", ySplit: 7, xSplit: opt.xSplit || 0, showGridLines: false}],
+    pageSetup: {orientation: opt.portrait ? "portrait" : "landscape", fitToPage: true, fitToWidth: 1, fitToHeight: 0, margins: {left: .4, right: .4, top: .6, bottom: .6, header: .3, footer: .3}, printTitlesRow: "7:7"}});
+  ws.headerFooter.oddFooter = `&L&8GFS Logistics · ${titles[0]}&C&8Page &P of &N&R&8Prepared from Sage Intacct`;
+  if (logo) ws.addImage(logo.id, {tl: {col: 0, row: 0}, ext: {width: 150, height: 150 * logo.ratio}});
+  ["GFS Logistics", ...titles].forEach((t, i) => { const r = i + 1; ws.mergeCells(r, 1, r, nCols); const c = ws.getCell(r, 1); c.value = t;
+    c.font = {name: XF, size: [14, 12, 10, 10, 8][i] || 9, bold: i < 2, italic: i >= 3, color: {argb: i >= 4 ? XMUTE : XINK}}; c.alignment = {horizontal: "center"}; });
+  ws.getRow(1).height = 22;
+  return ws;
+}
+function xlHeader(ws, heads) { const hr = ws.getRow(7); heads.forEach((h, i) => { const c = hr.getCell(i + 1); c.value = h; c.font = {name: XF, size: 9, bold: true}; c.alignment = {horizontal: i ? "right" : "left", wrapText: true, vertical: "bottom"}; c.border = {bottom: {style: "thin"}}; }); hr.height = 28; }
+function addSalesSheet(wb, div, actM, logo) {
+  const y = actM.slice(0, 4), ym = monthsThrough(actM), n = ym.length, all = customerRows(y, ym, [div], true);
+  all.forEach(r => { r.ya = r.act.reduce((a, b) => a + b, 0); r.yb = r.bud.reduce((a, b) => a + b, 0); });
+  const rows = all.filter(r => Math.abs(r.ya) + Math.abs(r.yb) > .5), last = n + 5, col = k => String.fromCharCode(65 + k);
+  const ws = xlSheet(wb, `${div} Sales by Customer`, last, [`Sales by Customer · ${ENTS[div]}`, `Invoiced sales by month, ${periodLine({mode: "trend", actM}).replace(/^For the /, "for the ")}`, "Net of credit memos · City Warehouse customers roll into their home division", "(Unaudited)"], logo, {xSplit: 1});
+  ws.getColumn(1).width = 40; for (let k = 2; k <= n + 1; k++) ws.getColumn(k).width = 11; [n + 2, n + 3, n + 4].forEach(k => ws.getColumn(k).width = 13); ws.getColumn(n + 5).width = 9;
+  xlHeader(ws, ["Customer", ...ym.map(x => MN[+x.slice(5) - 1]), "YTD Actual", "YTD Budget", "Variance", "Var %"]);
+  const cA = col(n + 1), cB = col(n + 2), cV = col(n + 3);   // YTD actual / budget / variance columns
+  let R = 8; const secTot = [];
+  const putRow = (r, vals, bud, opts = {}) => { const xr = ws.getRow(r); vals.forEach((v, i) => { const c = xr.getCell(i + 2); c.value = v; c.numFmt = XNF; c.font = {name: XF, size: 9, bold: opts.bold}; if (opts.rule) c.border = {top: {style: "thin"}}; });
+    const ya = xr.getCell(n + 2), yb = xr.getCell(n + 3), vr = xr.getCell(n + 4), vp = xr.getCell(n + 5);
+    ya.value = {formula: `SUM(B${r}:${col(n)}${r})`}; yb.value = bud; vr.value = {formula: `${cA}${r}-${cB}${r}`}; vp.value = {formula: `IF(${cB}${r}=0,"",(${cA}${r}-${cB}${r})/ABS(${cB}${r}))`};
+    [ya, yb, vr].forEach(c => { c.numFmt = XNF; c.font = {name: XF, size: 9, bold: true}; }); yb.font = {name: XF, size: 9, bold: opts.bold}; vp.numFmt = XPF; vp.font = {name: XF, size: 9};
+    if (opts.rule) [ya, yb, vr, vp].forEach(c => c.border = {top: {style: "thin"}}); };
+  for (const [k, lab] of SALES_SECS) {
+    const rs = rows.filter(r => r.sec === k).sort((a, b) => b.ya - a.ya || b.yb - a.yb); if (!rs.length) continue;
+    const h = ws.getRow(R).getCell(1); h.value = lab.toUpperCase(); h.font = {name: XF, size: 8.5, bold: true, color: {argb: "FF5B6B80"}}; R++;
+    const r0 = R;
+    for (const r of rs) { const c = ws.getRow(R).getCell(1); c.value = r.name; c.font = {name: XF, size: 9}; c.alignment = {indent: 1}; putRow(R, r.act.map(r2), r2(r.yb)); R++; }
+    const t = ws.getRow(R).getCell(1); t.value = `Total ${lab.toLowerCase()}`; t.font = {name: XF, size: 9, bold: true};
+    putRow(R, ym.map((_, i) => ({formula: `SUM(${col(i + 1)}${r0}:${col(i + 1)}${R - 1})`})), {formula: `SUM(${cB}${r0}:${cB}${R - 1})`}, {bold: true, rule: true});
+    secTot.push(R); R += 2;
+  }
+  const g = ws.getRow(R); g.getCell(1).value = `Total ${div} sales`; g.getCell(1).font = {name: XF, size: 10, bold: true};
+  putRow(R, ym.map((_, i) => ({formula: secTot.map(q => `${col(i + 1)}${q}`).join("+") || "0"})), {formula: secTot.map(q => `${cB}${q}`).join("+") || "0"}, {bold: true, rule: true});
+  for (let k = 1; k <= last; k++) { const c = g.getCell(k); c.fill = {type: "pattern", pattern: "solid", fgColor: {argb: "FFDCE6F2"}}; c.border = {top: {style: "thin"}, bottom: {style: "double"}}; }
+  const nt = ws.getRow(R + 2).getCell(1); nt.value = "Invoiced sales by invoice date from Sage AR. Sales won't tie to P&L revenue because recurring storage is deferred. Budget = customer budget from the 2026 package."; nt.font = {name: XF, size: 8, italic: true, color: {argb: XMUTE}};
+}
+async function arSnapshot(pw) { return decryptEnv(await (await fetch(arBase() + "data.enc.json?t=" + Date.now(), {cache: "no-store"})).json(), pw); }
+function addArSheet(wb, ar, logo) {
+  const asOf = new Date(ar.asOf + "T00:00:00"), day = d => Math.round((asOf - new Date((d || ar.asOf) + "T00:00:00")) / 864e5);
+  const by = new Map();
+  for (const it of ar.items) { const info = (ar.customers || {})[it.c] || {n: it.c, div: "Unassigned"}, age = day(it.due || it.d), b = age <= 0 ? 0 : age <= 30 ? 1 : age <= 60 ? 2 : age <= 90 ? 3 : 4;
+    const o = by.get(it.c) || {name: info.n || it.c, div: info.div || "Unassigned", lp: info.lp || "", b: [0, 0, 0, 0, 0], n: 0}; o.b[b] += it.bal; o.n++; by.set(it.c, o); }
+  const divs = [...new Set([...by.values()].map(o => o.div))].sort((a, b) => (a === "Unassigned") - (b === "Unassigned") || a.localeCompare(b));
+  const long = new Date(ar.asOf + "T12:00:00").toLocaleDateString("en-US", {month: "long", day: "numeric", year: "numeric"});
+  const ws = xlSheet(wb, "AR Aging", 9, ["Accounts Receivable Aging", `Aged by due date as of ${long}`, "Open invoices, credit memos and unapplied cash from Sage AR", "(Unaudited)"], logo, {portrait: false});
+  ws.getColumn(1).width = 42; for (let k = 2; k <= 7; k++) ws.getColumn(k).width = 14; ws.getColumn(8).width = 9; ws.getColumn(9).width = 14;
+  xlHeader(ws, ["Customer", "Current", "1–30 days", "31–60 days", "61–90 days", "Over 90 days", "Total", "% of total", "Last payment"]);
+  let R = 8; const subs = []; let grandRow;
+  const fill = (r, vals, bold, rule) => { const xr = ws.getRow(r); vals.forEach((v, i) => { const c = xr.getCell(i + 2); c.value = v; c.numFmt = XNF; c.font = {name: XF, size: 9, bold}; if (rule) c.border = {top: {style: "thin"}}; });
+    const t = xr.getCell(7); t.value = {formula: `SUM(B${r}:F${r})`}; t.numFmt = XNF; t.font = {name: XF, size: 9, bold: true}; if (rule) t.border = {top: {style: "thin"}}; return xr; };
+  const pctRows = [];
+  for (const d of divs) {
+    const cs = [...by.values()].filter(o => o.div === d).sort((a, b) => b.b.reduce((s, v) => s + v, 0) - a.b.reduce((s, v) => s + v, 0));
+    const h = ws.getRow(R).getCell(1); h.value = (ENTS[d] || d).toUpperCase(); h.font = {name: XF, size: 8.5, bold: true, color: {argb: "FF5B6B80"}}; R++;
+    const r0 = R;
+    for (const o of cs) { const xr = fill(R, o.b.map(r2)); const c = xr.getCell(1); c.value = o.name; c.font = {name: XF, size: 9}; c.alignment = {indent: 1};
+      const lp = xr.getCell(9); lp.value = o.lp ? new Date(o.lp + "T12:00:00") : ""; lp.numFmt = "m/d/yyyy"; lp.font = {name: XF, size: 9}; lp.alignment = {horizontal: "right"}; pctRows.push(R); R++; }
+    const xr = fill(R, [0, 1, 2, 3, 4].map(i => ({formula: `SUM(${"BCDEF"[i]}${r0}:${"BCDEF"[i]}${R - 1})`})), true, true);
+    xr.getCell(1).value = `Total ${d}`; xr.getCell(1).font = {name: XF, size: 9, bold: true}; subs.push(R); pctRows.push(R); R += 2;
+  }
+  grandRow = R; const g = fill(R, [0, 1, 2, 3, 4].map(i => ({formula: subs.map(q => `${"BCDEF"[i]}${q}`).join("+") || "0"})), true, true);
+  g.getCell(1).value = "Total accounts receivable"; g.getCell(1).font = {name: XF, size: 10, bold: true};
+  for (let k = 1; k <= 9; k++) { const c = g.getCell(k); c.fill = {type: "pattern", pattern: "solid", fgColor: {argb: "FFDCE6F2"}}; c.border = {top: {style: "thin"}, bottom: {style: "double"}}; }
+  const pr = ws.getRow(R + 1); pr.getCell(1).value = "% of total"; pr.getCell(1).font = {name: XF, size: 8.5, italic: true};
+  for (let k = 2; k <= 7; k++) { const L = "BCDEFG"[k - 2], c = pr.getCell(k); c.value = {formula: `IF($G$${grandRow}=0,"",${L}${grandRow}/$G$${grandRow})`}; c.numFmt = XPF; c.font = {name: XF, size: 8.5, italic: true}; }
+  for (const q of [...pctRows, grandRow]) { const c = ws.getRow(q).getCell(8); c.value = {formula: `IF($G$${grandRow}=0,"",G${q}/$G$${grandRow})`}; c.numFmt = XPF; c.font = {name: XF, size: 9}; }
+  const nt = ws.getRow(R + 3).getCell(1); nt.value = `Live AR from the AR Aging Dashboard (last Sage refresh ${new Date(ar.generatedAt || ar.asOf).toLocaleString("en-US", {month: "short", day: "numeric", year: "numeric", hour: "numeric", minute: "2-digit"})}). Current aging, not a month-end snapshot.`;
+  nt.font = {name: XF, size: 8, italic: true, color: {argb: XMUTE}};
+}
+function packageDrawer() {
+  const m = st.rep, y = m.slice(0, 4), cwOn = Math.abs(val("rev", "std", "CW", monthsThrough(m), "a")) > .5, hasAr = !!(store.get(AR_PW_KEY, true) || store.get(AR_PW_KEY));
+  const tabs = [["soo", "Statement of Operations · consolidated, month by month", true], ["G1", "G1 · GFS Logistics P&L, month by month", true], ["G2", "G2 · Texas Cartage P&L, month by month", true],
+    ...(cwOn ? [["CW", "CW · City Warehouse P&L, month by month", true]] : []), ["ar", "AR aging · current, by customer", true], ["sG1", "G1 sales by customer, month by month vs budget", true], ["sG2", "G2 sales by customer, month by month vs budget", true]];
+  drawerRows = [];
+  openDrawer("Export", "Financials package", `<p class="note" style="margin:0 0 16px">One Excel workbook with the monthly package. P&L tabs list every account with subtotals and totals as formulas, folded to category totals (use Excel's + buttons to open a category).</p>
+    <div class="card" style="margin-bottom:16px"><label class="ctl" style="margin-bottom:14px"><span>Through month</span><select id="pkM">${[...M.months].reverse().map(x => `<option value="${x}" ${x === m ? "selected" : ""}>${ymLabel(x, true)}</option>`).join("")}</select></label>
+      <div class="pk-list">${tabs.map(([k, l, on]) => `<label class="pk"><input type="checkbox" data-k="${k}" ${on ? "checked" : ""}> ${esc(l)}</label>`).join("")}</div>
+      <div id="pkAr" style="margin-top:14px;${hasAr ? "display:none" : ""}"><label class="ctl"><span>AR dashboard passphrase (for the AR aging tab)</span><input class="field" type="password" id="pkArPw" style="max-width:320px;height:36px;padding:0 12px" autocomplete="off"></label></div></div>
+    <button class="btn primary" id="pkGo">⤓ Download Excel package</button> <span class="muted small" id="pkMsg" style="margin-left:10px"></span>`);
+  $("#pkGo").addEventListener("click", async () => {
+    const btn = $("#pkGo"), msg = $("#pkMsg"), am = $("#pkM").value, want = new Set($$(".pk input:checked").map(i => i.dataset.k));
+    if (!want.size) { msg.textContent = "Pick at least one tab."; return; }
+    btn.disabled = true; msg.textContent = "Building…";
+    try {
+      await ensureYears([am.slice(0, 4)]); resetCaches(); await libExcel();
+      let ar = null;
+      if (want.has("ar")) { const pw = (store.get(AR_PW_KEY, true) || store.get(AR_PW_KEY) || $("#pkArPw").value || "").trim();
+        if (!pw) throw new Error("Enter the AR dashboard passphrase, or untick the AR aging tab.");
+        try { ar = await arSnapshot(pw); store.set(AR_PW_KEY, pw, true); } catch { throw new Error("That AR passphrase didn't open the AR data."); } }
+      const wb = new ExcelJS.Workbook(); wb.creator = "GFS Financials Dashboard"; const logo = await xlLogo(wb);
+      if (want.has("soo")) addStmtSheet(wb, trendCtx("soo", "ALL", am), "Statement of Operations", logo);
+      for (const e of ["G1", "G2", "CW"]) if (want.has(e)) addStmtSheet(wb, trendCtx("std", e, am), `${e} P&L`, logo);
+      if (ar) addArSheet(wb, ar, logo);
+      for (const d of ["G1", "G2"]) if (want.has("s" + d)) addSalesSheet(wb, d, am, logo);
+      await saveWb(wb, `GFS Financials Package - ${ymLabel(am, true)}.xlsx`);
+      msg.textContent = "Downloaded.";
+    } catch (e) { msg.textContent = e.message || String(e); }
+    finally { btn.disabled = false; }
+  });
+}
 /* ---------- PDF: auditor-style statement; one portrait page when it fits, otherwise landscape without splitting a group */
 async function exportPdf(ctx) {
   await libPdf();
@@ -1259,6 +1379,7 @@ function start(snap) {
 $("#lockForm").addEventListener("submit", e => { e.preventDefault(); unlock($("#pw").value, $("#remember").checked); });
 $("#nav").addEventListener("click", e => { const b = e.target.closest("button[data-view]"); if (b) go(b.dataset.view); });
 $("#repMonth").addEventListener("change", e => { st.rep = e.target.value; st.pl.actM = st.rep; st.pl.basis = null; st.cmp.a = st.cmp.b = null; render(); });
+$("#pkgBtn").addEventListener("click", () => { if (M) packageDrawer(); });
 $("#menuBtn").addEventListener("click", () => $("#side").classList.toggle("open"));
 $("#dClose").addEventListener("click", closeDrawer); $("#scrim").addEventListener("click", closeDrawer);
 document.addEventListener("keydown", e => { if (e.key === "Escape") closeDrawer(); });
