@@ -333,9 +333,19 @@ def build_live(cfg, tz):
         k = (g(r, "arAdjustment.createdDate"), g(r, "arAdjustment.adjustmentNumber") or "", g(r, "arAdjustment.customer.name") or "",
              g(r, "dimensions.location.id") or "", "c")
         sagg[k] += money(g(r, "baseCurrency.amount"))
+    # Months whose customer sales come from the package instead of Sage (cfg "salesFixed"): January 2026
+    # was invoiced before the Sage go-live and Sage only holds part of it.
+    fixed = cfg.get("salesFixed") or {}
     for (d, n, c, loc, kind), v in sorted(sagg.items()):
-        if abs(v) >= 0.005 and d:
+        if abs(v) >= 0.005 and d and d[:7] not in fixed:
             sales.append([d, S(n), S(c), loc, round(v, 2), kind])
+    for ym, spec in sorted(fixed.items()):
+        y, mo = int(ym[:4]), int(ym[5:7])
+        last = (dt.date(y + (mo == 12), mo % 12 + 1, 1) - dt.timedelta(days=1)).isoformat()
+        for name, div, amt in spec.get("rows", []):
+            sales.append([last, S("Package (fixed)"), S(name), div, round(float(amt), 2), "i"])
+    if fixed:
+        print(f"[sales] fixed package figures used for {len(fixed)} month(s)")
     print(f"[sales] {sum(1 for x in sales if x[5] == 'i')} invoices, {sum(1 for x in sales if x[5] == 'c')} credit memos")
 
     # --- 6. Checks (pass/fail only - public log)
